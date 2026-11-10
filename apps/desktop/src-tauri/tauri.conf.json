@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TikTok Studio",
+  "version": "0.3.0",
+  "identifier": "br.com.tiktokstudio.app",
+  "build": {
+    "beforeDevCommand": "npm --workspace apps/web run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm --workspace apps/web run build",
+    "frontendDist": "../../web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "TikTok Studio",
+        "width": 1360,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 650,
+        "center": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ]
+  }
+}

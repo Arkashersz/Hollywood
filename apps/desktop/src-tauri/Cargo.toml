@@ -1,0 +1,15 @@
+[package]
+name = "tiktok-studio"
+version = "0.3.0"
+description = "TikTok Studio desktop shell"
+authors = ["TikTok Studio"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

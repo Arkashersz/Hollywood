@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Mock chat</title>
+<!-- Página local que imita o contrato de DOM usado pelo adaptador. Não é o ChatGPT. -->
+<body>
+<header id="top"></header>
+<main id="thread"></main>
+<div id="alerts"></div>
+<form id="form" onsubmit="return false">
+  <input type="file" id="files" multiple>
+  <div id="prompt-textarea" contenteditable="true" role="textbox" style="min-height:40px;border:1px solid #999"></div>
+  <button type="button" data-testid="send-button" disabled>Send</button>
+  <button type="button" data-testid="stop-button" style="display:none">Stop</button>
+</form>
+<script>
+const params = new URLSearchParams(location.search);
+const thread = document.getElementById('thread');
+const composer = document.getElementById('prompt-textarea');
+const sendBtn = document.querySelector('[data-testid=send-button]');
+const stopBtn = document.querySelector('[data-testid=stop-button]');
+const fileInput = document.getElementById('files');
+let turn = 0;
+
+if (params.get('login')) document.getElementById('top').innerHTML = '<button data-testid="login-button">Log in</button>';
+if (params.get('challenge')) { document.title = 'Just a moment...'; document.getElementById('form').remove(); }
+if (params.get('history')) {
+  thread.innerHTML = '<article data-testid="conversation-turn-0"><div data-message-author-role="user">old</div></article>' +
+    '<article data-testid="conversation-turn-1"><div data-message-author-role="assistant"><p>old answer</p></div></article>';
+  turn = 2;
+}
+
+composer.addEventListener('input', () => { sendBtn.disabled = composer.innerText.trim().length === 0; });
+
+function addTurn(role, html) {
+  const article = document.createElement('article');
+  article.dataset.testid = 'conversation-turn-' + (turn++);
+  article.innerHTML = '<div data-message-author-role="' + role + '">' + html + '</div>';
+  thread.appendChild(article);
+  return article.firstChild;
+}
+const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+sendBtn.addEventListener('click', () => {
+  const prompt = composer.innerText;
+  const files = [...fileInput.files].map((f) => f.name);
+  composer.innerHTML = '';
+  sendBtn.disabled = true;
+  fileInput.value = '';
+  if (prompt.includes('[[toast-limit]]')) {
+    document.getElementById('alerts').innerHTML = '<div role="alert">You\'ve reached your limit. Try again later.</div>';
+    return;
+  }
+  if (prompt.includes('[[ignored]]')) return;
+  addTurn('user', '<p>' + esc(prompt) + '</p>' + files.map(() => '<img src="/gen.png" alt="uploaded">').join(''));
+  stopBtn.style.display = '';
+  if (prompt.includes('[[stall]]')) return;
+  setTimeout(() => {
+    const body = addTurn('assistant', '<div class="markdown"><p>Thinking</p></div>').firstChild;
+    setTimeout(() => {
+      if (prompt.includes('[[limit]]')) {
+        body.innerHTML = '<p>You\'ve reached your limit for image generation. Try again later.</p>';
+      } else if (prompt.includes('[[refuse]]')) {
+        body.innerHTML = '<p>I can\'t help with creating that image.</p>';
+      } else if (prompt.includes('[[image]]')) {
+        body.innerHTML = '<p>Here is the image.</p><img alt="Generated image" src="/gen.png?n=' + turn + '">' +
+          '<img alt="icon" src="/icon.png"><button>Download</button>';
+      } else {
+        body.innerHTML =
+          '<h1>Documento 03 · Roteiro</h1>' +
+          '<p>Texto com <strong>negrito</strong>, <em>itálico</em> e <code>codigo</code>.</p>' +
+          '<ul><li>Item um<ul><li>Sub item</li></ul></li><li>Item dois</li></ul>' +
+          '<ol><li>Primeiro</li><li>Segundo</li></ol>' +
+          '<table><thead><tr><th>Cena</th><th>Fala (DE)</th></tr></thead><tbody><tr><td>01</td><td>Hallo | Welt</td></tr></tbody></table>' +
+          '<blockquote><p>Citação</p></blockquote><hr>' +
+          '<pre><div class="header"><span>json</span><button>Copy</button></div><code class="language-json">' +
+          esc(JSON.stringify({ prompt, files }, null, 1)) + '</code></pre>';
+      }
+      stopBtn.style.display = 'none';
+    }, 500);
+  }, 300);
+});
+</script>
+</body>
+</html>

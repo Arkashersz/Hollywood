@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Mock video</title>
+<!-- Página local que imita o contrato de DOM usado pelo adaptador. Não é o Grok. -->
+<body>
+<header id="top"></header>
+<div id="feed"><video src="/old.mp4" preload="auto" muted></video></div>
+<div id="alerts"></div>
+<form id="form" onsubmit="return false">
+  <input type="file" id="files" accept="image/*">
+  <textarea id="composer"></textarea>
+  <button type="submit" id="go">Submit</button>
+</form>
+<pre id="log"></pre>
+<script>
+const params = new URLSearchParams(location.search);
+if (params.get('login')) document.getElementById('top').innerHTML = '<a href="/sign-in">Sign in</a>';
+document.getElementById('go').addEventListener('click', () => {
+  const prompt = document.getElementById('composer').value;
+  const files = [...document.getElementById('files').files].map((f) => f.name);
+  document.getElementById('log').textContent = JSON.stringify({ prompt, files });
+  if (prompt.includes('[[limit]]')) {
+    document.getElementById('alerts').innerHTML = '<div role="alert">Rate limit reached. Try again later.</div>';
+    return;
+  }
+  if (prompt.includes('[[never]]')) return;
+  setTimeout(() => {
+    const video = document.createElement('video');
+    video.preload = 'auto'; video.muted = true;
+    video.src = '/clip.mp4';
+    document.getElementById('feed').appendChild(video);
+  }, 600);
+});
+</script>
+</body>
+</html>

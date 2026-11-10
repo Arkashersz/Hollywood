@@ -1,0 +1,14 @@
+{
+  "name": "tiktok-studio",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "npm --workspace apps/web run dev",
+    "build": "npm --workspace apps/web run build",
+    "start": "powershell -NoProfile -ExecutionPolicy Bypass -File iniciar-tiktok-studio.ps1",
+    "desktop:dev": "cd apps/desktop && npx --yes @tauri-apps/cli@2 dev",
+    "desktop:build": "cd apps/desktop && npx --yes @tauri-apps/cli@2 build"
+  }
+}
