@@ -62,4 +62,6 @@ TEXT_TIMEOUT = _int("TEXT_TIMEOUT", 600)
 IMAGE_TIMEOUT = _int("IMAGE_TIMEOUT", 600)
 VIDEO_TIMEOUT = _int("VIDEO_TIMEOUT", 900)
 STALL_SECONDS = _int("STALL_SECONDS", 180)
+# Sem tarefas por este tempo (ex.: esperando a sua aprovação), o Chrome do worker é fechado; reabre sozinho na próxima tarefa.
+IDLE_CLOSE_SECONDS = _int("IDLE_CLOSE_SECONDS", 60)
 PAUSE_BETWEEN_ITEMS = _int("PAUSE_BETWEEN_ITEMS", 8)

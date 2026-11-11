@@ -11,6 +11,7 @@ import functools
 import http.server
 import io
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -209,6 +210,9 @@ def test_review_flow_sends_the_right_decisions(panel):
 
         # documento de etapa anterior: renderizado e higienizado
         await page.locator(".stage").nth(2).click()
+        assert not await page.locator(".md table").is_visible(), "etapa aprovada começa com os documentos recolhidos"
+        await page.get_by_text("Documentos", exact=True).click()
+        await page.locator(".doc > summary").first.click()
         await page.locator(".md table").wait_for()
         unsafe = await page.evaluate("[document.querySelectorAll('.md script, .md img').length, [...document.querySelectorAll('.md a')].filter(a => (a.getAttribute('href') || '').startsWith('javascript')).length, window.hacked === true]")
         assert unsafe == [0, 0, False]
@@ -265,3 +269,45 @@ def test_phone_layout_has_no_sideways_scroll(panel):
     (scroll_width, inner_width), box = drive(panel, scenario, viewport=(390, 844))
     assert scroll_width <= inner_width + 1, f"conteúdo com {scroll_width}px em tela de {inner_width}px"
     assert box and box["x"] >= 0 and box["x"] + box["width"] <= inner_width and box["height"] >= 32
+
+
+def test_start_from_ready_prompts_sends_a_structured_plan(panel):
+    async def scenario(page, fake):
+        await page.get_by_role("heading", name="Anna und der Hund").wait_for()
+        await page.get_by_role("tab", name="Já tenho os prompts").click()
+        create = page.get_by_role("button", name=re.compile("Criar com"))
+        assert await create.is_disabled()
+        await page.get_by_label(re.compile("Imagens dos personagens")).fill("## Anna\nFull body of Anna.\n\n## Hund\nFull body of a dog.")
+        await page.get_by_label(re.compile("Ambientes e cenas")).fill("## Cena 1\nReferências: Anna, Hund\nAnna and the dog in the kitchen.")
+        await page.get_by_label(re.compile("^Vídeos")).fill("Clip A says Hallo\n---\nImagem inicial: Cena 1\nClip B")
+        await page.get_by_text("2 item(ns)").first.wait_for()
+        await shot(page, "importar-prompts")
+        assert "Criar com 5 prompt(s)" in await create.inner_text()
+        await create.click()
+        await page.get_by_text("Projeto criado com 5 prompt(s).").wait_for()
+        return fake.rpc_calls
+    calls = drive(panel, scenario)
+    assert [c[0] for c in calls] == ["create_project_from_plan"]
+    args = calls[0][1]
+    assert args["p_plan"] == {
+        "character_images": [{"name": "Anna", "prompt": "Full body of Anna."}, {"name": "Hund", "prompt": "Full body of a dog."}],
+        "scene_images": [{"name": "Cena 1", "prompt": "Anna and the dog in the kitchen.", "refs": ["Anna", "Hund"]}],
+        "production": [{"name": "Clipe 1", "prompt": "Clip A says Hallo"}, {"name": "Clipe 2", "prompt": "Clip B", "start": "Cena 1"}],
+    }
+
+
+def test_gallery_lightbox_navigates_and_shows_overview(panel):
+    async def scenario(page, fake):
+        await page.get_by_role("heading", name="Anna und der Hund").wait_for()
+        await page.get_by_text("Precisa de você agora").wait_for()
+        await page.get_by_text("Etapas aprovadas", exact=True).wait_for()
+        await page.get_by_role("button", name=re.compile("Ampliar Anna")).click()
+        dialog = page.get_by_role("dialog")
+        await dialog.get_by_text("1 de 2").wait_for()
+        await page.keyboard.press("ArrowRight")
+        await dialog.get_by_text("2 de 2").wait_for()
+        await shot(page, "galeria")
+        await page.keyboard.press("Escape")
+        assert await dialog.count() == 0
+        return await page.title()
+    assert drive(panel, scenario).startswith("(1)")

@@ -2,9 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import {
   Activity, AlertTriangle, Check, ChevronRight, Clapperboard, Cloud, Film, FolderOpen, Link2, LogOut, MessageSquareWarning,
-  Monitor, Plus, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles,
+  Bell, ChevronDown, ChevronLeft, Clock, Download, Monitor, Plus, SkipForward, X, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles,
 } from 'lucide-react';
 import { Markdown } from './Markdown';
+import { buildPlan, type PlanKey } from './importPlan';
 import { AGENT_LABEL, FALLBACK_ICON, STAGE_META, STATUS_LABEL, timeAgo, type Artifact, type EventRow, type Heartbeat, type Project, type Stage } from './types';
 
 type View = 'projects' | 'activity' | 'integrations';
@@ -16,6 +17,7 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [stages, setStages] = useState<Stage[]>([]);
+  const [allStages, setAllStages] = useState<Stage[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [heartbeat, setHeartbeat] = useState<Heartbeat | null>(null);
@@ -28,13 +30,15 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
   selectedRef.current = selectedId;
 
   const refresh = useCallback(async () => {
-    const [p, h] = await Promise.all([
+    const [p, h, all] = await Promise.all([
       db.from('projects').select('*').order('updated_at', { ascending: false }),
       db.from('worker_heartbeats').select('*').order('last_seen_at', { ascending: false }).limit(1),
+      db.from('project_stages').select('*').order('stage_order'),
     ]);
     if (p.error) { setNotice(`Sem acesso ao Supabase: ${p.error.message}`); return; }
     const list = (p.data ?? []) as Project[];
     setProjects(list);
+    setAllStages((all.data ?? []) as Stage[]);
     setHeartbeat(((h.data ?? [])[0] as Heartbeat) ?? null);
     const current = selectedRef.current && list.some((x) => x.id === selectedRef.current) ? selectedRef.current : list[0]?.id ?? null;
     if (current !== selectedRef.current) setSelectedId(current);
@@ -93,6 +97,22 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
     return !error;
   }, [db, refresh]);
 
+  const attention = useMemo(() => allStages.filter((x) => x.status === 'pending_review' || x.status === 'failed')
+    .map((x) => ({ stage: x, project: projects.find((pr) => pr.id === x.project_id) })).filter((x) => !!x.project) as { stage: Stage; project: Project }[], [allStages, projects]);
+  const seenAttention = useRef<number | null>(null);
+  useEffect(() => {
+    document.title = attention.length ? `(${attention.length}) TikTok Studio` : 'TikTok Studio';
+    if (seenAttention.current !== null && attention.length > seenAttention.current && 'Notification' in window && Notification.permission === 'granted') {
+      new Notification('TikTok Studio', { body: 'Uma etapa está esperando a sua aprovação.' });
+    }
+    seenAttention.current = attention.length;
+  }, [attention.length]);
+  const download = useCallback(async (path: string, name: string) => {
+    const { data, error } = await db.storage.from(BUCKET).createSignedUrl(path, 300, { download: name });
+    if (error || !data) { setNotice(`Não foi possível baixar: ${error?.message ?? 'sem link'}`); return; }
+    window.open(data.signedUrl, '_blank', 'noopener');
+  }, [db]);
+
   const workerOnline = !!heartbeat && heartbeat.status === 'online' && Date.now() - new Date(heartbeat.last_seen_at).getTime() < 60000;
   const project = projects.find((p) => p.id === selectedId) ?? null;
   const initials = (session.user.email ?? 'TS').slice(0, 2).toUpperCase();
@@ -130,8 +150,8 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
         <section className="content">
           {notice && <div className="notice" role="status"><Sparkles size={17} /><span>{notice}</span><button className="linkbtn" onClick={() => setNotice('')}>fechar</button></div>}
           {view === 'projects' && (
-            <ProjectsView projects={projects} project={project} stages={stages} artifacts={artifacts} urls={urls} live={live} workerOnline={workerOnline}
-              onSelect={setSelectedId} call={call} />
+            <ProjectsView projects={projects} project={project} stages={stages} allStages={allStages} attention={attention} artifacts={artifacts} urls={urls} live={live} workerOnline={workerOnline}
+              onSelect={setSelectedId} call={call} download={download} />
           )}
           {view === 'activity' && <ActivityView events={events} projects={projects} />}
           {view === 'integrations' && <IntegrationsView heartbeat={heartbeat} workerOnline={workerOnline} />}
@@ -144,23 +164,50 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
 
 type Call = (fn: string, args: Record<string, unknown>, ok: string) => Promise<boolean>;
 
+type Attention = { stage: Stage; project: Project }[];
+type Download = (path: string, name: string) => void;
+
+function projectState(project: Project, stages: Stage[]): { label: string; tone: string } {
+  if (project.status === 'completed') return { label: 'Concluído', tone: 'ok' };
+  if (stages.some((x) => x.status === 'failed')) return { label: 'Parada · precisa de você', tone: 'bad' };
+  if (stages.some((x) => x.status === 'pending_review')) return { label: 'Aguardando sua aprovação', tone: 'accent' };
+  if (stages.some((x) => x.status === 'in_progress')) return { label: 'Em andamento', tone: 'warn' };
+  if (stages.some((x) => x.status === 'queued' || x.status === 'changes_requested')) return { label: 'Na fila do worker', tone: 'warn' };
+  return { label: 'Em produção', tone: 'muted' };
+}
+
 function ProjectsView(props: {
-  projects: Project[]; project: Project | null; stages: Stage[]; artifacts: Artifact[]; urls: Record<string, string>; live: boolean; workerOnline: boolean;
-  onSelect: (id: string) => void; call: Call;
+  projects: Project[]; project: Project | null; stages: Stage[]; allStages: Stage[]; attention: Attention; artifacts: Artifact[]; urls: Record<string, string>; live: boolean; workerOnline: boolean;
+  onSelect: (id: string) => void; call: Call; download: Download;
 }) {
-  const { projects, project, stages, artifacts, urls, live, workerOnline, onSelect, call } = props;
+  const { projects, project, stages, allStages, attention, artifacts, urls, live, workerOnline, onSelect, call, download } = props;
+  const [notifyAsked, setNotifyAsked] = useState(() => !('Notification' in window) || Notification.permission !== 'default');
   const [source, setSource] = useState('');
   const [title, setTitle] = useState('');
+  const [mode, setMode] = useState<'link' | 'prompts'>('link');
+  const [texts, setTexts] = useState<Record<PlanKey, string>>({ character_images: '', character_sheets: '', scene_images: '', production: '' });
+  const built = useMemo(() => buildPlan(texts), [texts]);
   const [stageId, setStageId] = useState<string | null>(null);
   const approved = stages.filter((s) => s.status === 'approved').length;
   const current = stages.find((s) => s.status !== 'approved') ?? stages[stages.length - 1] ?? null;
   const stage = stages.find((s) => s.id === stageId) ?? current;
+  const readyMedia = artifacts.filter((a) => a.artifact_type === 'image' || a.artifact_type === 'video').length;
+  const heroItem = artifacts.find((a) => a.artifact_type === 'image' && a.storage_path);
+  const heroUrl = heroItem?.storage_path ? urls[`${heroItem.storage_path}|${heroItem.updated_at}`] : undefined;
 
   useEffect(() => { setStageId(null); }, [project?.id]);
 
   async function create() {
     if (!source.trim()) return;
     if (await call('create_project', { p_title: title, p_source: source }, 'Projeto criado. A análise começa assim que o worker estiver online.')) { setSource(''); setTitle(''); }
+  }
+
+  async function createFromPrompts() {
+    if (!built.total || built.problem) return;
+    if (await call('create_project_from_plan', { p_title: title, p_source: source, p_plan: built.plan },
+      `Projeto criado com ${built.total} prompt(s). A geração começa assim que o worker estiver online; cada etapa para na sua aprovação.`)) {
+      setTexts({ character_images: '', character_sheets: '', scene_images: '', production: '' }); setTitle(''); setSource(''); setMode('link');
+    }
   }
 
   return (
@@ -170,7 +217,49 @@ function ProjectsView(props: {
         <div className="cloudtag"><Cloud size={16} /> {live ? 'Supabase em tempo real' : 'Supabase: atualização a cada 15 s'}</div>
       </div>
 
-      <div className="create">
+      {attention.length > 0 && (
+        <div className="attention">
+          <div className="attentionhead"><b><Bell size={15} /> Precisa de você agora</b><em>{attention.length}</em></div>
+          <div className="attentioncards">
+            {attention.map(({ stage: st, project: pr }) => (
+              <button key={st.id} className={`attcard ${st.status}`} onClick={() => onSelect(pr.id)}>
+                <span className={`agent ${STAGE_META[st.stage_key]?.agent ?? ''}`}>{STAGE_META[st.stage_key] ? AGENT_LABEL[STAGE_META[st.stage_key].agent] : ''}</span>
+                <b>{pr.title}</b><small>{st.title}</small>
+                <i>{st.status === 'failed' ? 'Parada · ver o que fazer' : 'Revisar e aprovar'} <ChevronRight size={14} /></i>
+              </button>
+            ))}
+          </div>
+          {!notifyAsked && <button className="linkbtn" onClick={() => { setNotifyAsked(true); Notification.requestPermission(); }}>Avisar no navegador quando uma etapa ficar pronta</button>}
+        </div>
+      )}
+      <div className="modetabs" role="tablist" aria-label="Como começar">
+        <button role="tab" aria-selected={mode === 'link'} className={mode === 'link' ? 'on' : ''} onClick={() => setMode('link')}><Link2 size={15} /> A partir de um vídeo do TikTok</button>
+        <button role="tab" aria-selected={mode === 'prompts'} className={mode === 'prompts' ? 'on' : ''} onClick={() => setMode('prompts')}><SkipForward size={15} /> Já tenho os prompts</button>
+      </div>
+      {mode === 'prompts' && (
+        <div className="importbox">
+          <div className="importintro">
+            <b>Comece direto na geração</b>
+            <small>Cole os prompts que você já tem. As etapas de texto são puladas; só as etapas com prompts rodam, e cada uma para para a sua aprovação.
+              Use um bloco por item: uma linha <code>## Nome</code> e, embaixo, o prompt. Para reaproveitar uma imagem, escreva <code>Referências: Nome A, Nome B</code>;
+              nos vídeos, <code>Imagem inicial: Nome da imagem</code> (ou <code>anterior</code>). Sem <code>##</code>, separe os itens com uma linha <code>---</code>.</small>
+          </div>
+          {IMPORT_FIELDS.map((f) => (
+            <label className="importfield" key={f.key}>
+              <span><b>{f.label}</b> <em>{f.agent}</em><small>{f.hint}</small></span>
+              <textarea rows={5} value={texts[f.key]} onChange={(e) => setTexts((old) => ({ ...old, [f.key]: e.target.value }))} placeholder={f.placeholder} spellCheck={false} />
+              <small className="count">{built.plan[f.key]?.length ?? 0} item(ns)</small>
+            </label>
+          ))}
+          <div className="importfoot">
+            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Título (opcional)" />
+            <input value={source} onChange={(e) => setSource(e.target.value)} placeholder="Link de referência (opcional)" />
+            <button className="primary" disabled={!built.total || !!built.problem} onClick={createFromPrompts}>Criar com {built.total || 0} prompt(s) <ChevronRight size={16} /></button>
+          </div>
+          {built.problem && <div className="callout warn"><AlertTriangle size={15} /><span>{built.problem}</span></div>}
+        </div>
+      )}
+      {mode === 'link' && <div className="create">
         <div className="createicon"><Plus size={20} /></div>
         <div className="createcopy"><b>Começar uma nova produção</b><small>Link do TikTok ou caminho de um .mp4 no PC do worker.</small></div>
         <div className="createfields">
@@ -178,29 +267,51 @@ function ProjectsView(props: {
           <div className="createinput"><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Título (opcional)" onKeyDown={(e) => e.key === 'Enter' && create()} />
             <button onClick={create} disabled={!source.trim()}>Criar projeto <ChevronRight size={16} /></button></div>
         </div>
-      </div>
+      </div>}
       {!workerOnline && <div className="notice warn"><Monitor size={17} /><span>O worker não está online: as etapas ficam na fila até você iniciá-lo no computador principal (<code>worker\start-worker.ps1</code>).</span></div>}
 
       <div className="sectionhead"><div><h2>Produções</h2><small>{projects.length} projeto(s)</small></div></div>
       {projects.length === 0 ? <div className="empty">Nenhum projeto ainda. Cole um link acima para começar.</div> : (
         <div className="projectlayout">
           <div className="projectlist">
-            {projects.map((p) => (
-              <button key={p.id} onClick={() => onSelect(p.id)} className={`project ${project?.id === p.id ? 'selected' : ''}`}>
-                <div className="projectthumb"><Film size={21} /></div>
-                <div className="projectmeta"><b>{p.title}</b><small>{timeAgo(p.updated_at)}</small><span>{p.status === 'completed' ? 'Concluído' : STAGE_TITLE(p.current_stage)}</span></div>
-                <ChevronRight size={17} />
-              </button>
-            ))}
+            {projects.map((p) => {
+              const mine = allStages.filter((x) => x.project_id === p.id);
+              const state = projectState(p, mine);
+              const nowStage = mine.find((x) => x.status !== 'approved') ?? null;
+              const agent = nowStage ? STAGE_META[nowStage.stage_key]?.agent : undefined;
+              return (
+                <button key={p.id} onClick={() => onSelect(p.id)} className={`project ${project?.id === p.id ? 'selected' : ''}`}>
+                  <div className="projectthumb"><Film size={21} /></div>
+                  <div className="projectmeta">
+                    <b>{p.title}</b>
+                    <div className="seg mini" aria-hidden="true">{mine.map((x) => <i key={x.id} className={x.status} />)}</div>
+                    <span className={`state ${state.tone}`}>{state.label}</span>
+                    <small>{nowStage ? STAGE_TITLE(nowStage.stage_key) : 'Todas as etapas aprovadas'}{agent ? ` · ${AGENT_LABEL[agent]}` : ''} · {timeAgo(p.updated_at)}</small>
+                  </div>
+                  <ChevronRight size={17} />
+                </button>
+              );
+            })}
           </div>
           {project && (
             <div className="detail">
               <div className="detailtop">
-                <div><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{project.source_url}</small></div>
-                <span className="statuspill">{project.status === 'completed' ? 'Concluído' : 'Em produção'}</span>
+                {heroUrl && <img className="hero" src={heroUrl} alt="" />}
+                <div className="herotext"><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{project.source_url}</small></div>
+                <span className={`statuspill st-${projectState(project, stages).tone}`}>{projectState(project, stages).label}</span>
               </div>
+              <div className="stats">
+                <div><small>Etapas aprovadas</small><b>{approved}<span>/{stages.length}</span></b></div>
+                <div><small>Imagens e vídeos</small><b>{readyMedia}<span> prontos</span></b></div>
+                <div><small>Agora</small><b className="nowline">{current ? current.title : '—'}</b>{current && STAGE_META[current.stage_key] && <span className={`agent ${STAGE_META[current.stage_key].agent}`}>{AGENT_LABEL[STAGE_META[current.stage_key].agent]}</span>}</div>
+              </div>
+              {!workerOnline && stages.some((x) => x.status === 'queued' || x.status === 'in_progress') && (
+                <div className="callout warn"><Clock size={15} /><span>O worker está offline. Esta etapa começa quando o computador principal estiver ligado com o worker rodando.</span></div>
+              )}
               <div className="progresshead"><b>Fluxo de produção</b><small>{approved} de {stages.length} etapas aprovadas</small></div>
               <div className="seg" aria-hidden="true">{stages.map((s) => <i key={s.id} className={s.status} />)}</div>
+              <details className="fold" open>
+              <summary><span>Etapas do fluxo</span><em>{approved}/{stages.length}</em><ChevronDown size={16} className="chev" /></summary>
               <div className="stages">
                 {stages.map((s) => {
                   const meta = STAGE_META[s.stage_key];
@@ -209,13 +320,14 @@ function ProjectsView(props: {
                     <button className={`stage ${s.status} ${stage?.id === s.id ? 'open' : ''}`} key={s.id} onClick={() => setStageId(s.id)}>
                       <div className="stageicon"><Icon size={17} /></div>
                       <div className="stagetext"><b>{String(s.stage_order).padStart(2, '0')} · {s.title}</b><small>{meta?.subtitle}</small></div>
-                      <div className="stagestatus">{s.status === 'approved' && <Check size={13} />}{STATUS_LABEL[s.status]}</div>
+                      <div className="stagestatus">{s.status === 'approved' && (s.payload?.skipped ? <SkipForward size={13} /> : <Check size={13} />)}{s.payload?.skipped ? 'Pulada' : STATUS_LABEL[s.status]}</div>
                     </button>
                   );
                 })}
               </div>
-              {stage && <StagePanel key={stage.id} stage={stage} next={stages.find((s) => s.stage_order === stage.stage_order + 1) ?? null}
-                artifacts={artifacts.filter((a) => a.stage_id === stage.id)} urls={urls} call={call} />}
+              </details>
+              {stage && <StagePanel key={stage.id} stage={stage} next={stages.filter((s) => s.stage_order > stage.stage_order && s.status === 'locked').sort((a, b) => a.stage_order - b.stage_order)[0] ?? null}
+                artifacts={artifacts.filter((a) => a.stage_id === stage.id)} urls={urls} call={call} download={download} />}
             </div>
           )}
         </div>
@@ -224,13 +336,21 @@ function ProjectsView(props: {
   );
 }
 
+const IMPORT_FIELDS: { key: PlanKey; label: string; agent: string; hint: string; placeholder: string }[] = [
+  { key: 'character_images', label: 'Imagens dos personagens', agent: 'ChatGPT', hint: 'Corpo inteiro de cada personagem.', placeholder: '## Anna\nFull-body character on a plain background, ...' },
+  { key: 'character_sheets', label: 'Folhas 16:9 dos personagens', agent: 'ChatGPT', hint: 'Use Referências: para apontar a imagem do personagem.', placeholder: '## Folha da Anna\nReferências: Anna\n16:9 character sheet, ...' },
+  { key: 'scene_images', label: 'Ambientes e cenas', agent: 'ChatGPT', hint: 'Imagem-base de cada cena; referencie personagens e ambientes pelo nome.', placeholder: '## Cozinha\nEmpty bright kitchen, ...\n\n## Cena 1\nReferências: Anna, Cozinha\nAnna at the table, ...' },
+  { key: 'production', label: 'Vídeos', agent: 'Grok', hint: 'Um clipe por prompt. Imagem inicial: nome de uma imagem acima.', placeholder: '## Clipe 1\nImagem inicial: Cena 1\nAnna says "Hallo" ...' },
+];
+
 const STAGE_TITLES: Record<string, string> = {
   analysis: 'Análise da referência', script: 'Roteiro', character_bible: 'Personagens e vozes', character_images: 'Imagens dos personagens',
   character_sheets: 'Folhas dos personagens', visual_plan: 'Ambientes e cenas', scene_images: 'Imagens de cenas', video_prompts: 'Prompts de vídeo', production: 'Vídeos no Grok',
 };
 const STAGE_TITLE = (key: string) => STAGE_TITLES[key] ?? key;
 
-function StagePanel({ stage, next, artifacts, urls, call }: { stage: Stage; next: Stage | null; artifacts: Artifact[]; urls: Record<string, string>; call: Call }) {
+function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: Stage; next: Stage | null; artifacts: Artifact[]; urls: Record<string, string>; call: Call; download: Download }) {
+  const [open, setOpen] = useState<number | null>(null);
   const [comment, setComment] = useState('');
   const [asking, setAsking] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -238,6 +358,7 @@ function StagePanel({ stage, next, artifacts, urls, call }: { stage: Stage; next
   const docs = artifacts.filter((a) => a.artifact_type === 'document').sort((a, b) => (a.item_key ?? '').localeCompare(b.item_key ?? ''));
   const media = artifacts.filter((a) => a.artifact_type !== 'document').sort((a, b) => (a.item_key ?? '').localeCompare(b.item_key ?? ''));
   const reviewing = stage.status === 'pending_review';
+  const gallery = media.filter((m) => m.artifact_type === 'image' && m.storage_path);
   const generation = payload.next_generation;
 
   async function run(fn: string, args: Record<string, unknown>, ok: string) {
@@ -251,7 +372,7 @@ function StagePanel({ stage, next, artifacts, urls, call }: { stage: Stage; next
     <div className="stagepanel">
       <div className="panelhead">
         <div><div className="eyebrow">ETAPA {String(stage.stage_order).padStart(2, '0')} · VERSÃO {stage.current_version}</div><h4>{stage.title}</h4></div>
-        <span className={`statuspill s-${stage.status}`}>{STATUS_LABEL[stage.status]}</span>
+        <span className={`statuspill s-${stage.status}`}>{payload.skipped ? 'Pulada' : STATUS_LABEL[stage.status]}</span>
       </div>
       {STAGE_META[stage.stage_key] && <div><span className={`agent ${STAGE_META[stage.stage_key].agent}`}>Feito por {AGENT_LABEL[STAGE_META[stage.stage_key].agent]}</span></div>}
 
@@ -270,19 +391,30 @@ function StagePanel({ stage, next, artifacts, urls, call }: { stage: Stage; next
         </div>
       )}
 
-      {docs.map((doc, i) => (
-        <details className="doc" key={doc.id} open={docs.length === 1 || (reviewing && i === 0)}>
-          <summary>{doc.name}<small>v{doc.version} · {timeAgo(doc.updated_at)}</small></summary>
-          <Markdown text={doc.content.markdown ?? ''} />
+      {docs.length > 0 && (
+        <details className="fold" open={reviewing}>
+          <summary><span>Documentos</span><em>{docs.length}</em><ChevronDown size={16} className="chev" /></summary>
+          {docs.map((doc, i) => (
+            <details className="doc" key={doc.id} open={reviewing && i === 0}>
+              <summary>{doc.name}<small>v{doc.version} · {timeAgo(doc.updated_at)}</small></summary>
+              <Markdown text={doc.content.markdown ?? ''} />
+            </details>
+          ))}
         </details>
-      ))}
+      )}
 
       {media.length > 0 && (
-        <div className="mediagrid">
-          {media.map((item) => <MediaCard key={item.id} item={item} url={item.storage_path ? urls[`${item.storage_path}|${item.updated_at}`] : undefined}
-            canRegenerate={reviewing && (item.artifact_type === 'image' || item.artifact_type === 'video')} call={call} />)}
-        </div>
+        <details className="fold" open={reviewing || stage.status === 'in_progress'}>
+          <summary><span>{media.every((m) => m.artifact_type === 'video') ? 'Vídeos' : media.every((m) => m.artifact_type === 'image') ? 'Imagens' : 'Arquivos'}</span><em>{media.length}</em><ChevronDown size={16} className="chev" /></summary>
+          <div className="mediagrid">
+            {media.map((item) => <MediaCard key={item.id} item={item} url={item.storage_path ? urls[`${item.storage_path}|${item.updated_at}`] : undefined}
+              canRegenerate={reviewing && (item.artifact_type === 'image' || item.artifact_type === 'video')} call={call} download={download}
+              onOpen={item.artifact_type === 'image' && item.storage_path ? () => setOpen(gallery.findIndex((g) => g.id === item.id)) : undefined} />)}
+          </div>
+        </details>
       )}
+
+      {open !== null && gallery[open] && <Lightbox items={gallery} index={open} urls={urls} setIndex={setOpen} download={download} />}
 
       {stage.status === 'failed' && (
         <div className="approval"><div><b>Etapa parada</b><small>Resolva o que foi indicado acima; os itens já prontos são mantidos.</small></div>
@@ -310,7 +442,7 @@ function StagePanel({ stage, next, artifacts, urls, call }: { stage: Stage; next
   );
 }
 
-function MediaCard({ item, url, canRegenerate, call }: { item: Artifact; url?: string; canRegenerate: boolean; call: Call }) {
+function MediaCard({ item, url, canRegenerate, call, download, onOpen }: { item: Artifact; url?: string; canRegenerate: boolean; call: Call; download: Download; onOpen?: () => void }) {
   const [asking, setAsking] = useState(false);
   const [comment, setComment] = useState('');
   const size = item.content.width && item.content.height ? `${item.content.width}×${item.content.height}` : item.content.duration ? `${item.content.duration} s` : '';
@@ -318,11 +450,12 @@ function MediaCard({ item, url, canRegenerate, call }: { item: Artifact; url?: s
     <figure className={`mediacard ${item.artifact_type}`}>
       {item.artifact_type === 'video'
         ? (url ? <video src={url} controls preload="metadata" /> : <div className="placeholder">{item.content.note ?? 'Prévia indisponível'}</div>)
-        : (url ? <a href={url} target="_blank" rel="noopener noreferrer"><img src={url} alt={item.name} loading="lazy" /></a> : <div className="placeholder">Carregando prévia…</div>)}
+        : (url ? <button type="button" className="imgbtn" onClick={onOpen} aria-label={`Ampliar ${item.name}`}><img src={url} alt={item.name} loading="lazy" /></button> : <div className="placeholder">Carregando prévia…</div>)}
       <figcaption>
         <b>{item.name}</b>
         <small>{[size, item.local_relative_path].filter(Boolean).join(' · ')}</small>
         {item.content.prompt && <details><summary>Prompt usado</summary><pre>{item.content.prompt}</pre></details>}
+        {item.storage_path && <button className="ghost small" onClick={() => download(item.storage_path as string, item.name.replace(/[^\w.-]+/g, '_') + (item.artifact_type === 'video' ? '.mp4' : '.jpg'))}><Download size={13} /> Baixar prévia</button>}
         {canRegenerate && (asking ? (
           <div className="regen">
             <input autoFocus value={comment} onChange={(e) => setComment(e.target.value)} placeholder="O que ajustar (opcional)" />
@@ -335,18 +468,61 @@ function MediaCard({ item, url, canRegenerate, call }: { item: Artifact; url?: s
   );
 }
 
+function Lightbox({ items, index, urls, setIndex, download }: { items: Artifact[]; index: number; urls: Record<string, string>; setIndex: (i: number | null) => void; download: Download }) {
+  const item = items[index];
+  const url = item.storage_path ? urls[`${item.storage_path}|${item.updated_at}`] : undefined;
+  const go = useCallback((delta: number) => setIndex((index + delta + items.length) % items.length), [index, items.length, setIndex]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setIndex(null); else if (e.key === 'ArrowRight') go(1); else if (e.key === 'ArrowLeft') go(-1); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [go, setIndex]);
+  return (
+    <div className="lightbox" role="dialog" aria-modal="true" aria-label={item.name} onClick={() => setIndex(null)}>
+      <div className="lbbody" onClick={(e) => e.stopPropagation()}>
+        <div className="lbimg">{url ? <img src={url} alt={item.name} /> : <div className="placeholder">Carregando…</div>}</div>
+        <aside className="lbside">
+          <div className="lbtop"><span>{index + 1} de {items.length}</span><button className="iconbtn" aria-label="Fechar" onClick={() => setIndex(null)}><X size={16} /></button></div>
+          <b>{item.name}</b>
+          <small>{[item.content.width && item.content.height ? `${item.content.width}×${item.content.height}` : '', item.local_relative_path].filter(Boolean).join(' · ')}</small>
+          {item.content.prompt && <><div className="eyebrow">PROMPT USADO</div><pre>{item.content.prompt}</pre></>}
+          <div className="lbbtns">
+            <button className="ghost" onClick={() => go(-1)} disabled={items.length < 2}><ChevronLeft size={15} /> Anterior</button>
+            <button className="ghost" onClick={() => go(1)} disabled={items.length < 2}>Próxima <ChevronRight size={15} /></button>
+            {item.storage_path && <button className="primary" onClick={() => download(item.storage_path as string, item.name.replace(/[^\w.-]+/g, '_') + '.jpg')}><Download size={14} /> Baixar</button>}
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
 function ActivityView({ events, projects }: { events: EventRow[]; projects: Project[] }) {
   const titles = useMemo(() => Object.fromEntries(projects.map((p) => [p.id, p.title])), [projects]);
+  const [shown, setShown] = useState<Record<string, number>>({});
+  const groups = useMemo(() => {
+    const map = new Map<string, EventRow[]>();
+    for (const e of events) map.set(e.project_id, [...(map.get(e.project_id) ?? []), e]);
+    return [...map.entries()];
+  }, [events]);
   return (
     <>
       <div className="heading"><div><div className="eyebrow">REGISTRO</div><h1>Atividade</h1><p>O que o worker fez, onde parou e por quê.</p></div></div>
       {events.length === 0 ? <div className="empty">Nenhum evento registrado ainda.</div> : (
-        <div className="eventlist">
-          {events.map((e) => (
-            <div className={`event ${e.level}`} key={e.id}>
-              <span className="dot" />
-              <div><b>{e.message}</b><small>{titles[e.project_id] ?? 'Projeto'}{e.stage_key ? ` · ${STAGE_TITLE(e.stage_key)}` : ''} · {new Date(e.created_at).toLocaleString('pt-BR')}</small></div>
-            </div>
+        <div className="eventgroups">
+          {groups.map(([projectId, rows], index) => (
+            <details className="fold" key={projectId} open={index === 0}>
+              <summary><span>{titles[projectId] ?? 'Projeto'}</span><em>{rows.length}</em><ChevronDown size={16} className="chev" /></summary>
+              <div className="eventlist">
+                {rows.slice(0, shown[projectId] ?? 10).map((e) => (
+                  <div className={`event ${e.level}`} key={e.id}>
+                    <span className="dot">{(() => { const I = (e.stage_key && STAGE_META[e.stage_key]?.icon) || Activity; return <I size={14} />; })()}</span>
+                    <div><b>{e.message}</b><small>{e.stage_key ? `${STAGE_TITLE(e.stage_key)} · ` : ''}{new Date(e.created_at).toLocaleString('pt-BR')}</small></div>
+                  </div>
+                ))}
+                {rows.length > (shown[projectId] ?? 10) && <button className="ghost small" onClick={() => setShown((old) => ({ ...old, [projectId]: (old[projectId] ?? 10) + 20 }))}>Mostrar mais ({rows.length - (shown[projectId] ?? 10)})</button>}
+              </div>
+            </details>
           ))}
         </div>
       )}

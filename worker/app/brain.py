@@ -96,6 +96,6 @@ async def _run_cli(command: list[str], prompt: str, cwd: Path, timeout: int) -> 
             proc = subprocess.run(command, input=prompt, cwd=str(cwd), env=env, text=True, encoding="utf-8", errors="replace",
                                   capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
-            raise Blocked("TIMEOUT", f"O Claude não respondeu em {timeout} s.") from None
+            raise Blocked("TIMEOUT", f"O Claude não respondeu em {timeout} s.", "O Claude demorou demais neste texto. Clique em Tentar novamente; se repetir, confira em worker/.env que CLAUDE_EFFORT=low e reinicie o worker.") from None
         return proc.returncode, proc.stdout or "", proc.stderr or ""
     return await asyncio.to_thread(run)

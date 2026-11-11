@@ -60,6 +60,10 @@ class Browser:
         self._proc: subprocess.Popen | None = None
         self._pages: dict[str, object] = {}
 
+    @property
+    def is_open(self) -> bool:
+        return self._browser is not None or (self._proc is not None and self._proc.poll() is None)
+
     async def start(self) -> None:
         if self._browser is not None and self._browser.is_connected():
             return
@@ -108,4 +112,5 @@ class Browser:
         self._browser = self._pw = self._context = None
         if self._proc is not None and self._proc.poll() is None:
             self._proc.terminate()
+        self._proc = None
         self._proc = None

@@ -7,6 +7,8 @@ export type Project = { id: string; title: string; source_url: string | null; st
 export type StageError = { code: string; message: string; action?: string; blocked?: boolean };
 export type StagePayload = {
   summary?: string;
+  skipped?: boolean;
+  imported?: boolean;
   warnings?: string[];
   error?: StageError;
   review_comment?: string;

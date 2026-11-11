@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import sys
+import time
 import traceback
 
 from . import config
@@ -43,7 +44,7 @@ async def process(db: Db, job: dict, brain_for, images, video) -> None:
     ctx = Ctx(project_id=project["id"], source=project.get("source_url") or project.get("source_video_path") or "", dir=project_dir,
               sink=sink, brain=brain_for(project_dir), images=images, video=video, stage_key=stage["stage_key"], version=stage["current_version"],
               feedback=inp.get("feedback"), max_clip=config.GROK_MAX_CLIP_SECONDS, whisper_model=config.WHISPER_MODEL,
-              language=config.REFERENCE_LANGUAGE, pause=lambda: asyncio.sleep(config.PAUSE_BETWEEN_ITEMS))
+              language=config.REFERENCE_LANGUAGE, plan=project.get("import_plan"), pause=lambda: asyncio.sleep(config.PAUSE_BETWEEN_ITEMS))
     regen = kind == "regen_item"
     db.update_stage(stage["id"], status="in_progress", remove=("error", "progress"))
     try:
@@ -95,6 +96,7 @@ async def main() -> None:
     if stale:
         print(f"{stale} tarefa(s) interrompida(s) voltaram para a fila.", flush=True)
     beat = asyncio.create_task(heartbeat(db, state))
+    idle_since = time.monotonic()
     try:
         while True:
             try:
@@ -104,6 +106,10 @@ async def main() -> None:
                 await asyncio.sleep(max(config.POLL_SECONDS, 10))
                 continue
             if job is None:
+                # Terminou o que podia fazer (a etapa foi para a sua aprovação): libera o Chrome e só consulta a fila.
+                if browser.is_open and time.monotonic() - idle_since > config.IDLE_CLOSE_SECONDS:
+                    await browser.close()
+                    print("Ocioso: Chrome do worker fechado. Reabre quando houver nova tarefa (após sua aprovação).", flush=True)
                 await asyncio.sleep(config.POLL_SECONDS)
                 continue
             state["job"] = {"id": job["id"], "type": job["job_type"], "stage_key": (job.get("input") or {}).get("stage_key")}
@@ -116,6 +122,7 @@ async def main() -> None:
                 except Exception:  # noqa: BLE001
                     pass
             state["job"] = None
+            idle_since = time.monotonic()
     finally:
         beat.cancel()
         try:

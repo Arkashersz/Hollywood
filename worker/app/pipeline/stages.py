@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import media
+from ..media import slugify
 from ..errors import Blocked
 from . import prompts, render
 from .core import Ctx, ask_json, strip_leading_title, validate_bible, validate_clips, validate_plan
@@ -31,6 +32,71 @@ class Item:
     prompt: str
     refs: Callable[[], list[Path]]
     kind: str = "image"   # image | video
+
+
+# ---------------------------------------------------------------------------
+# Projeto iniciado com prompts prontos (sem as etapas de texto)
+# ---------------------------------------------------------------------------
+IMPORT_DIRS = {"character_images": "personagens", "character_sheets": "folhas", "scene_images": "cenas", "production": "clipes"}
+
+
+def _imported_items(ctx: Ctx, stage_key: str) -> list[Item]:
+    """Itens da etapa a partir dos prompts do usuário. Referências são resolvidas pelo NOME de outra imagem do plano."""
+    plan = ctx.plan or {}
+    paths: dict[str, Path] = {}      # nome (minúsculo) -> arquivo da imagem
+    for key in ("character_images", "character_sheets", "scene_images"):
+        used: set[str] = set()
+        for entry in plan.get(key) or []:
+            slug = slugify(entry["name"], 50)
+            base, n = slug, 2
+            while slug in used:
+                slug, n = f"{base}-{n}", n + 1
+            used.add(slug)
+            paths.setdefault(str(entry["name"]).strip().casefold(), ctx.dir / "imagens" / IMPORT_DIRS[key] / f"{slug}.png")
+
+    def resolve(names: list[str], owner: str) -> list[Path]:
+        out = []
+        for raw in names:
+            path = paths.get(str(raw).strip().casefold())
+            if path is None:
+                raise Blocked("MISSING_INPUT", f'"{owner}" usa a referência "{raw}", que não está entre as imagens que você enviou.')
+            if not path.is_file():
+                raise Blocked("MISSING_INPUT", f'"{owner}" precisa da imagem "{raw}", que ainda não foi gerada ({path.name}). '
+                                               "Envie esse prompt numa etapa anterior ou salve a imagem nesse caminho.")
+            out.append(path)
+        return out
+
+    items: list[Item] = []
+    used: set[str] = set()
+    for index, entry in enumerate(plan.get(stage_key) or [], 1):
+        name, prompt = str(entry["name"]).strip(), str(entry["prompt"]).strip()
+        slug = slugify(name, 50)
+        base, n = slug, 2
+        while slug in used:
+            slug, n = f"{base}-{n}", n + 1
+        used.add(slug)
+        if stage_key == "production":
+            start = str(entry.get("start") or "").strip()
+            previous = items[-1].path if items else None
+
+            def start_image(start=start, name=name, previous=previous, index=index) -> list[Path]:
+                if not start:
+                    return []
+                if start.casefold() in ("anterior", "previous", "ultimo quadro", "último quadro"):
+                    if previous is None or not previous.is_file():
+                        raise Blocked("MISSING_INPUT", f'"{name}" continua do clipe anterior, que ainda não existe.')
+                    frame = ctx.dir / "videos" / "_quadros" / f"inicio-{index:02d}.png"
+                    frame.parent.mkdir(parents=True, exist_ok=True)
+                    return [media.last_frame(previous, frame)]
+                return resolve([start], name)
+
+            items.append(Item(f"imp-video-{index:02d}-{slug}", f"{index:02d} · {name}", ctx.dir / "videos" / "importados" / f"{index:02d}-{slug}.mp4",
+                              prompt, start_image, "video"))
+        else:
+            refs = [str(r) for r in entry.get("refs") or []]
+            items.append(Item(f"imp-{stage_key}-{slug}", name, ctx.dir / "imagens" / IMPORT_DIRS[stage_key] / f"{slug}.png",
+                              prompt, lambda refs=refs, name=name: resolve(refs, name)))
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -189,23 +255,42 @@ def _clip_items(ctx: Ctx) -> list[Item]:
                  render.clip_prompt(bible, c), lambda c=c: start_image(c), "video") for c in clips["clips"]]
 
 
-ITEM_BUILDERS: dict[str, Callable[[Ctx], list[Item]]] = {
+_BUILDERS: dict[str, Callable[[Ctx], list[Item]]] = {
     "character_images": _character_items, "character_sheets": _sheet_items,
     "scene_images": _scene_items, "production": _clip_items,
 }
 
 
+def items_for(ctx: Ctx, stage_key: str) -> list[Item]:
+    if ctx.plan and ctx.plan.get(stage_key):
+        return _imported_items(ctx, stage_key)
+    return _BUILDERS[stage_key](ctx)
+
+
+ITEM_BUILDERS = _BUILDERS
+
+
+def _imported_next(ctx: Ctx) -> dict:
+    """Próximo lote autorizado pela aprovação, num projeto com prompts prontos (as etapas sem itens foram puladas)."""
+    units = {"character_images": ("ChatGPT", "imagens de personagens"), "character_sheets": ("ChatGPT", "folhas 16:9"),
+             "scene_images": ("ChatGPT", "imagens de ambiente e cena"), "production": ("Grok", "vídeos")}
+    for key in ORDER[ORDER.index(ctx.stage_key) + 1:]:
+        if key in units and ctx.plan.get(key):
+            return {"next_generation": {"service": units[key][0], "count": len(ctx.plan[key]), "unit": units[key][1]}}
+    return {}
+
+
 async def character_images(ctx: Ctx) -> dict:
-    items = _character_items(ctx)
+    items = items_for(ctx, "character_images")
     stats = await generate(ctx, items, note=ctx.feedback)
-    return {"summary": f"{len(items)} imagem(ns) de corpo inteiro ({stats['made']} gerada(s) agora).",
-            "next_generation": {"service": "ChatGPT", "count": len(items), "unit": "folhas 16:9"}}
+    nxt = _imported_next(ctx) if ctx.plan else {"next_generation": {"service": "ChatGPT", "count": len(items), "unit": "folhas 16:9"}}
+    return {"summary": f"{len(items)} imagem(ns) de corpo inteiro ({stats['made']} gerada(s) agora).", **nxt}
 
 
 async def character_sheets(ctx: Ctx) -> dict:
-    items = _sheet_items(ctx)
+    items = items_for(ctx, "character_sheets")
     stats = await generate(ctx, items, note=ctx.feedback)
-    return {"summary": f"{len(items)} folha(s) 16:9 ({stats['made']} gerada(s) agora)."}
+    return {"summary": f"{len(items)} folha(s) 16:9 ({stats['made']} gerada(s) agora).", **(_imported_next(ctx) if ctx.plan else {})}
 
 
 # ---------------------------------------------------------------------------
@@ -224,9 +309,9 @@ async def visual_plan(ctx: Ctx) -> dict:
 
 
 async def scene_images(ctx: Ctx) -> dict:
-    items = _scene_items(ctx)
+    items = items_for(ctx, "scene_images")
     stats = await generate(ctx, items, note=ctx.feedback)
-    return {"summary": f"{len(items)} imagem(ns) de ambiente e cena ({stats['made']} gerada(s) agora)."}
+    return {"summary": f"{len(items)} imagem(ns) de ambiente e cena ({stats['made']} gerada(s) agora).", **(_imported_next(ctx) if ctx.plan else {})}
 
 
 # ---------------------------------------------------------------------------
@@ -253,10 +338,10 @@ async def video_prompts(ctx: Ctx) -> dict:
 
 
 async def production(ctx: Ctx) -> dict:
-    items = _clip_items(ctx)
+    items = items_for(ctx, "production")
     stats = await generate(ctx, items, note=ctx.feedback)
     total = round(sum(media.probe(i.path)["duration"] for i in items), 1)
-    warnings = [] if total > 70 else [f"A soma real dos clipes é {total} s, abaixo da meta de 70 s. Regenere clipes mais longos ou acrescente cenas."]
+    warnings = [] if (total > 70 or ctx.plan) else [f"A soma real dos clipes é {total} s, abaixo da meta de 70 s. Regenere clipes mais longos ou acrescente cenas."]
     return {"summary": f"{len(items)} clipe(s), {total} s no total ({stats['made']} gerado(s) agora). Próximo passo: editar no CapCut conforme o Documento 09.",
             "warnings": warnings}
 
@@ -276,8 +361,7 @@ async def run_stage(ctx: Ctx) -> dict:
 
 
 async def regen_item(ctx: Ctx, item_key: str, comment: str | None) -> dict:
-    builder = ITEM_BUILDERS.get(ctx.stage_key)
-    if builder is None:
+    if ctx.stage_key not in ITEM_BUILDERS:
         raise Blocked("MISSING_INPUT", "Esta etapa não tem itens regeneráveis.")
-    await generate(ctx, builder(ctx), only=item_key, note=comment)
+    await generate(ctx, items_for(ctx, ctx.stage_key), only=item_key, note=comment)
     return {"summary": f"Item regenerado: {item_key}."}

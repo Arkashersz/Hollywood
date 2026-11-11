@@ -160,6 +160,39 @@ assert.equal((await q(`select * from approvals where project_id=$1`, [project.id
 assert.ok((await q(`select * from events where project_id=$1`, [project.id])).length >= 12);
 step('aprovações liberam uma etapa por vez e concluem o projeto');
 
+// --- começar de uma etapa avançada (prompts prontos) -------------------------------
+await as(B);
+await fails(`select create_project_from_plan('x', null, '{"production":[{"name":"a","prompt":"b"}]}')`, [], /pertence a outra conta/);
+await as(A);
+await fails(`select create_project_from_plan('x', null, '{}')`, [], /pelo menos um prompt/);
+await fails(`select create_project_from_plan('x', null, '{"production":[{"name":"a"}]}')`, [], /nome e prompt/);
+await fails(`select create_project_from_plan('x', null, '{"scene_images":"não é lista"}')`, [], /Lista inválida/);
+const plan = { character_images: [{ name: 'Anna', prompt: 'p1' }], production: [{ name: 'Clipe 1', prompt: 'v1', start: 'Anna' }] };
+const [imp] = await q(`select * from create_project_from_plan($1,$2,$3::jsonb)`, ['Meu', null, JSON.stringify(plan)]);
+assert.equal(imp.current_stage, 'character_images');
+assert.equal(imp.source_url, 'Prompts prontos (sem vídeo de referência)');
+let istages = await q(`select stage_key, status, payload from project_stages where project_id=$1 order by stage_order`, [imp.id]);
+assert.deepEqual(istages.map((x) => x.status), ['approved', 'approved', 'approved', 'queued', 'approved', 'approved', 'approved', 'approved', 'locked']);
+assert.equal(istages[0].payload.skipped, true);
+assert.equal((await q(`select * from jobs where project_id=$1`, [imp.id])).length, 1);
+await as(null, 'service_role');
+await db.query(`update jobs set status='succeeded' where project_id=$1`, [imp.id]);
+await db.query(`update project_stages set status='pending_review' where project_id=$1 and stage_key='character_images'`, [imp.id]);
+await as(A);
+const [cimg] = await q(`select id from project_stages where project_id=$1 and stage_key='character_images'`, [imp.id]);
+await q(`select * from decide_stage($1,'approve')`, [cimg.id]);
+istages = await q(`select stage_key, status from project_stages where project_id=$1 order by stage_order`, [imp.id]);
+assert.equal(istages.find((x) => x.stage_key === 'production').status, 'queued', 'a aprovação pula as etapas já puladas e libera a próxima com itens');
+assert.equal((await q(`select input from jobs where project_id=$1 and status='queued'`, [imp.id]))[0].input.stage_key, 'production');
+await as(null, 'service_role');
+await db.query(`update jobs set status='succeeded' where project_id=$1`, [imp.id]);
+await db.query(`update project_stages set status='pending_review' where project_id=$1 and stage_key='production'`, [imp.id]);
+await as(A);
+const [prod] = await q(`select id from project_stages where project_id=$1 and stage_key='production'`, [imp.id]);
+await q(`select * from decide_stage($1,'approve')`, [prod.id]);
+assert.equal((await q(`select status from projects where id=$1`, [imp.id]))[0].status, 'completed');
+step('projeto com prompts prontos: etapas puladas, fila na primeira com itens, aprovação segue em frente e conclui');
+
 // --- storage ------------------------------------------------------------------
 await as(null, 'service_role');
 await db.query(`insert into storage.objects(bucket_id,name) values ('artifacts',$1),('artifacts','outro/x.jpg')`, [`${project.id}/imagens/a.jpg`]);

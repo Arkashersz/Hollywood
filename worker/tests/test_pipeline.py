@@ -301,3 +301,47 @@ def test_identification_table_uses_only_downloaded_metadata(tmp_path):
                                                                                     "video_codec": "h264", "audio_codec": "aac"}})
     assert "| Hashtags originais | #fyp #lustig |" in table and "visualizações: 10" in table and "curtidas" not in table
     assert "| Som (metadados) | Song — Band |" in table
+
+
+IMPORTED = {
+    "character_images": [{"name": "Anna", "prompt": "Full body of Anna, red coat."}, {"name": "Böser Hund", "prompt": "Full body of a grumpy dog."}],
+    "scene_images": [{"name": "Küche", "prompt": "Empty bright kitchen."},
+                     {"name": "Cena 1", "prompt": "Anna at the table.", "refs": ["anna", "Küche"]}],
+    "production": [{"name": "Abertura", "prompt": "Anna says Hallo.", "start": "Cena 1"},
+                   {"name": "Continuação", "prompt": "Anna smiles.", "start": "anterior"}],
+}
+
+
+def test_imported_prompts_run_the_generation_stages_without_text_stages(project):
+    ctx, llm, video, sink = project
+    ctx.plan = IMPORTED
+    first = run(ctx, "character_images")
+    assert [i["prompt"] for i in llm.images] == ["Full body of Anna, red coat.", "Full body of a grumpy dog."]
+    assert first["next_generation"] == {"service": "ChatGPT", "count": 2, "unit": "imagens de ambiente e cena"}, "pula folhas (sem itens)"
+    scenes = run(ctx, "scene_images")
+    assert llm.images[3]["refs"] == ["anna.png", "k-che.png"], "referências resolvidas por nome, sem diferenciar maiúsculas"
+    assert scenes["next_generation"]["service"] == "Grok" and scenes["next_generation"]["count"] == 2
+    done = run(ctx, "production")
+    assert [c["start"] for c in video.calls] == ["cena-1.png", "inicio-02.png"]
+    assert done["warnings"] == [], "sem exigência de 70 s quando os prompts são do usuário"
+    assert not llm.asks, "nenhuma chamada ao Claude: os prompts já são do usuário"
+
+
+def test_imported_reference_to_unknown_or_missing_image_is_reported(project):
+    ctx, llm, video, sink = project
+    ctx.plan = {"scene_images": [{"name": "Cena", "prompt": "x", "refs": ["Fantasma"]}]}
+    with pytest.raises(Blocked, match="Fantasma"):
+        run(ctx, "scene_images")
+    ctx.plan = {"character_images": [{"name": "Anna", "prompt": "a"}], "scene_images": [{"name": "Cena", "prompt": "x", "refs": ["Anna"]}]}
+    with pytest.raises(Blocked, match="ainda não foi gerada"):
+        run(ctx, "scene_images")
+
+
+def test_imported_item_can_be_regenerated_alone(project):
+    ctx, llm, video, sink = project
+    ctx.plan = IMPORTED
+    run(ctx, "character_images")
+    ctx.stage_key = "character_images"
+    before = len(llm.images)
+    asyncio.run(stages.regen_item(ctx, "imp-character_images-anna", "mais escuro"))
+    assert len(llm.images) == before + 1 and "mais escuro" in llm.images[-1]["prompt"]

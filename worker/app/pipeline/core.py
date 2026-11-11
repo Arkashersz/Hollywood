@@ -66,6 +66,7 @@ class Ctx:
     whisper_model: str = "small"
     language: str | None = None
     pause: Callable | None = None   # espera entre gerações (injetável nos testes)
+    plan: dict | None = None        # prompts trazidos prontos pelo usuário (projeto iniciado numa etapa avançada)
     _generated: dict = field(default_factory=dict)
 
     # --- registro -----------------------------------------------------------
