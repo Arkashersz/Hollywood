@@ -210,7 +210,7 @@ async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note
         if only is not None and item.key != only:
             continue
         recorded = ctx.generated_version(item.key)
-        if only is None and item.path.is_file() and (recorded is None or recorded >= ctx.version):
+        if only is None and item.key not in ctx.force and item.path.is_file() and (recorded is None or recorded >= ctx.version):
             ctx.sink.file(ctx.stage_key, item.key, item.name, item.path, item.kind, _meta(item))
             kept += 1
             continue
@@ -249,7 +249,9 @@ async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note
             made += 1
             finished += 1
         except Exception as exc:  # noqa: BLE001 - guarda o primeiro erro; os itens já em andamento terminam sozinhos
-            state["error"] = state["error"] or exc
+            if state["error"] is None:
+                exc.item = {"key": item.key, "name": item.name, "prompt": item.prompt[:6000], "kind": item.kind}
+                state["error"] = exc
         finally:
             slots.put_nowait(slot)
 
@@ -333,9 +335,12 @@ _BUILDERS: dict[str, Callable[[Ctx], list[Item]]] = {
 
 
 def items_for(ctx: Ctx, stage_key: str) -> list[Item]:
-    if ctx.plan and ctx.plan.get(stage_key):
-        return _imported_items(ctx, stage_key)
-    return _BUILDERS[stage_key](ctx)
+    items = _imported_items(ctx, stage_key) if ctx.plan and ctx.plan.get(stage_key) else _BUILDERS[stage_key](ctx)
+    for item in items:   # o usuário pode ter editado o prompt de um item depois de ele falhar ou de ser aprovado
+        edited = (ctx.overrides or {}).get(item.key)
+        if isinstance(edited, str) and edited.strip():
+            item.prompt = edited.strip()
+    return items
 
 
 ITEM_BUILDERS = _BUILDERS

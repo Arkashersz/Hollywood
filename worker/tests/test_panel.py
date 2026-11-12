@@ -199,10 +199,10 @@ def test_review_flow_sends_the_right_decisions(panel):
         await shot(page, "revisao")
 
         # regenerar um item
-        await page.locator(".mediacard").first.get_by_role("button", name="Regenerar").click()
+        await page.locator(".mediacard").first.get_by_role("button", name="Ajustar").click()
         await page.get_by_placeholder("O que ajustar (opcional)").fill("casaco mais escuro")
         await page.get_by_role("button", name="Gerar de novo").click()
-        await page.get_by_text("Regeneração enfileirada").wait_for()
+        await page.get_by_text("Ajuste enfileirado").wait_for()
 
         # pedir ajustes exige comentário
         await page.get_by_role("button", name="Pedir ajustes").click()
@@ -260,7 +260,7 @@ def test_review_flow_sends_the_right_decisions(panel):
         return fake.rpc_calls
     calls = drive(panel, scenario)
     assert calls == [
-        ("regenerate_item", {"p_artifact_id": "img-Anna", "p_comment": "casaco mais escuro"}),
+        ("adjust_item", {"p_stage_id": "stage-4", "p_item_key": "img-personagem-anna-corpo", "p_prompt": None, "p_comment": "casaco mais escuro"}),
         ("decide_stage", {"p_stage_id": "stage-4", "p_decision": "request_changes", "p_comment": "Anna mais velha"}),
         ("decide_stage", {"p_stage_id": "stage-4", "p_decision": "approve"}),
         ("retry_stage", {"p_stage_id": "stage-5"}),

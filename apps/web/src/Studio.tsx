@@ -382,6 +382,7 @@ const STAGE_TITLES: Record<string, string> = {
   character_sheets: 'Folhas dos personagens', visual_plan: 'Ambientes e cenas', scene_images: 'Imagens de cenas', video_prompts: 'Prompts de vídeo', production: 'Vídeos no Grok',
 };
 const STAGE_TITLE = (key: string) => STAGE_TITLES[key] ?? key;
+const GENERATION_STAGES = ['character_images', 'character_sheets', 'scene_images', 'production'];
 
 function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: Stage; next: Stage | null; artifacts: Artifact[]; urls: Record<string, string>; call: Call; download: Download }) {
   const [open, setOpen] = useState<number | null>(null);
@@ -392,6 +393,10 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
   const docs = artifacts.filter((a) => a.artifact_type === 'document').sort((a, b) => (a.item_key ?? '').localeCompare(b.item_key ?? ''));
   const media = artifacts.filter((a) => a.artifact_type !== 'document').sort((a, b) => (a.item_key ?? '').localeCompare(b.item_key ?? ''));
   const reviewing = stage.status === 'pending_review';
+  const adjustable = GENERATION_STAGES.includes(stage.stage_key) && ['failed', 'pending_review', 'approved'].includes(stage.status);
+  const [fixPrompt, setFixPrompt] = useState('');
+  const failedItem = stage.status === 'failed' ? payload.error?.item : undefined;
+  useEffect(() => { setFixPrompt(failedItem?.prompt ?? ''); }, [failedItem?.key, failedItem?.prompt]);
   const gallery = media.filter((m) => m.artifact_type === 'image' && m.storage_path);
   const generation = payload.next_generation;
 
@@ -424,6 +429,15 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
           <div><b>{payload.error.blocked ? 'Precisa de você' : 'Falhou'} · {payload.error.code}</b><span>{payload.error.message}</span>{payload.error.action && <span className="action">{payload.error.action}</span>}</div>
         </div>
       )}
+      {failedItem && (
+        <div className="fixitem">
+          <b>Parou em: {failedItem.name}</b>
+          <small>Se o prompt foi recusado ou não gera, ajuste o texto e tente de novo a partir deste item. Os itens já prontos são mantidos.</small>
+          <textarea rows={6} value={fixPrompt} onChange={(e) => setFixPrompt(e.target.value)} spellCheck={false} aria-label={`Prompt de ${failedItem.name}`} />
+          <button disabled={busy || !fixPrompt.trim()} onClick={() => run('adjust_item', { p_stage_id: stage.id, p_item_key: failedItem.key, p_prompt: fixPrompt.trim() === failedItem.prompt.trim() ? null : fixPrompt, p_comment: null }, 'Ajuste enviado; o worker refaz a partir deste item.')}>
+            <RotateCcw size={16} /> Salvar prompt e tentar de novo</button>
+        </div>
+      )}
 
       {docs.length > 0 && (
         <details className="fold" open={reviewing}>
@@ -438,11 +452,12 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
       )}
 
       {media.length > 0 && (
-        <details className="fold" open={reviewing || stage.status === 'in_progress'}>
+        <details className="fold" open={reviewing || stage.status === 'in_progress' || stage.status === 'failed'}>
           <summary><span>{media.every((m) => m.artifact_type === 'video') ? 'Vídeos' : media.every((m) => m.artifact_type === 'image') ? 'Imagens' : 'Arquivos'}</span><em>{media.length}</em><ChevronDown size={16} className="chev" /></summary>
+          {adjustable && stage.status === 'approved' && <p className="muted">Quer mudar algo? Use <b>Ajustar</b> em qualquer item: só ele é refeito e a etapa volta para a sua revisão. Confira depois se as etapas seguintes ainda servem.</p>}
           <div className="mediagrid">
-            {media.map((item) => <MediaCard key={item.id} item={item} url={item.storage_path ? urls[`${item.storage_path}|${item.updated_at}`] : undefined}
-              canRegenerate={reviewing && (item.artifact_type === 'image' || item.artifact_type === 'video')} call={call} download={download}
+            {media.map((item) => <MediaCard key={item.id} item={item} stageId={stage.id} url={item.storage_path ? urls[`${item.storage_path}|${item.updated_at}`] : undefined}
+              canRegenerate={adjustable && (item.artifact_type === 'image' || item.artifact_type === 'video') && !!item.item_key} call={call} download={download}
               onOpen={item.artifact_type === 'image' && item.storage_path ? () => setOpen(gallery.findIndex((g) => g.id === item.id)) : undefined} />)}
           </div>
         </details>
@@ -476,9 +491,12 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
   );
 }
 
-function MediaCard({ item, url, canRegenerate, call, download, onOpen }: { item: Artifact; url?: string; canRegenerate: boolean; call: Call; download: Download; onOpen?: () => void }) {
+function MediaCard({ item, stageId, url, canRegenerate, call, download, onOpen }: { item: Artifact; stageId: string; url?: string; canRegenerate: boolean; call: Call; download: Download; onOpen?: () => void }) {
   const [asking, setAsking] = useState(false);
   const [comment, setComment] = useState('');
+  const original = item.content.prompt ?? '';
+  const [prompt, setPrompt] = useState(original);
+  useEffect(() => { if (!asking) setPrompt(original); }, [original, asking]);
   const size = item.content.width && item.content.height ? `${item.content.width}×${item.content.height}` : item.content.duration ? `${item.content.duration} s` : '';
   return (
     <figure className={`mediacard ${item.artifact_type}`}>
@@ -492,11 +510,12 @@ function MediaCard({ item, url, canRegenerate, call, download, onOpen }: { item:
         {item.storage_path && <button className="ghost small" onClick={() => download(item.storage_path as string, item.name.replace(/[^\w.-]+/g, '_') + (item.artifact_type === 'video' ? '.mp4' : '.jpg'))}><Download size={13} /> Baixar prévia</button>}
         {canRegenerate && (asking ? (
           <div className="regen">
+            {original && <textarea rows={5} value={prompt} onChange={(e) => setPrompt(e.target.value)} spellCheck={false} aria-label={`Prompt de ${item.name}`} />}
             <input autoFocus value={comment} onChange={(e) => setComment(e.target.value)} placeholder="O que ajustar (opcional)" />
-            <button onClick={async () => { if (await call('regenerate_item', { p_artifact_id: item.id, p_comment: comment }, `Regeneração enfileirada: ${item.name}.`)) { setAsking(false); setComment(''); } }}>Gerar de novo</button>
+            <button onClick={async () => { if (await call('adjust_item', { p_stage_id: stageId, p_item_key: item.item_key, p_prompt: prompt.trim() && prompt.trim() !== original.trim() ? prompt : null, p_comment: comment.trim() || null }, `Ajuste enfileirado: ${item.name}.`)) { setAsking(false); setComment(''); } }}>Gerar de novo</button>
             <button className="ghost" onClick={() => setAsking(false)}>Cancelar</button>
           </div>
-        ) : <button className="ghost small" onClick={() => setAsking(true)}><RotateCcw size={13} /> Regenerar</button>)}
+        ) : <button className="ghost small" onClick={() => setAsking(true)}><RotateCcw size={13} /> Ajustar</button>)}
       </figcaption>
     </figure>
   );

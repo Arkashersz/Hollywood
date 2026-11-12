@@ -71,6 +71,8 @@ class Ctx:
     image_concurrency: int = 1      # imagens geradas ao mesmo tempo (uma aba por item)
     video_concurrency: int = 1
     pilot_approved: bool = False    # o clipe-piloto já foi aprovado: a etapa de vídeos gera o restante
+    overrides: dict = field(default_factory=dict)   # prompts editados pelo usuário: chave do item -> texto
+    force: set = field(default_factory=set)          # itens a refazer mesmo já prontos (ajuste pedido numa etapa parada)
     clone: bool = False             # modo cópia fiel: roteiro, cortes e câmera idênticos ao original
     plan: dict | None = None        # prompts trazidos prontos pelo usuário (projeto iniciado numa etapa avançada)
     _generated: dict = field(default_factory=dict)

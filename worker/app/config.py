@@ -69,6 +69,6 @@ IDLE_CLOSE_SECONDS = _int("IDLE_CLOSE_SECONDS", 60)
 # Quantos itens do MESMO lote o worker gera ao mesmo tempo (uma aba do navegador por item). 1 = um por vez.
 # Quantos projetos (links) o worker conduz ao mesmo tempo. Os demais esperam na fila. 1 = um projeto por vez.
 MAX_PARALLEL_JOBS = max(1, min(4, _int("MAX_PARALLEL_JOBS", 3)))
-IMAGE_CONCURRENCY = max(1, min(4, _int("IMAGE_CONCURRENCY", 3)))
+IMAGE_CONCURRENCY = max(1, min(10, _int("IMAGE_CONCURRENCY", 3)))
 VIDEO_CONCURRENCY = max(1, min(4, _int("VIDEO_CONCURRENCY", 1)))
 PAUSE_BETWEEN_ITEMS = _int("PAUSE_BETWEEN_ITEMS", 8)

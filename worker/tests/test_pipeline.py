@@ -499,3 +499,29 @@ def test_inspired_mode_is_unchanged(project):
     run(ctx, "analysis"); run(ctx, "script")
     assert not any("REMAKE FIEL" in a["prompt"] for a in llm.asks)
     assert any("Teste de originalidade" in a["prompt"] for a in llm.asks)
+
+
+def test_failed_item_is_reported_and_an_edited_prompt_is_used_on_retry(project):
+    ctx, llm, _, _ = project
+    run_until(ctx, "character_bible")
+    llm.fail_image_at = 1
+    with pytest.raises(Blocked) as err:
+        run(ctx, "character_images")
+    item = err.value.as_dict()["item"]
+    assert item["key"] == "img-personagem-b-ser-hund-corpo" and item["prompt"] and item["name"]
+    ctx.overrides = {item["key"]: "Um cachorro simpático, versão suavizada."}
+    run(ctx, "character_images")
+    assert llm.images[-1]["prompt"].endswith("Um cachorro simpático, versão suavizada.") or "versão suavizada" in llm.images[-1]["prompt"]
+    assert [i["out"] for i in llm.images].count("personagem-anna-corpo.png") == 1   # o que já estava pronto não é refeito
+
+
+def test_force_remakes_an_item_that_already_exists_even_when_the_stage_is_resumed(project):
+    ctx, llm, _, _ = project
+    run_until(ctx, "character_images")
+    before = len(llm.images)
+    run(ctx, "character_images")
+    assert len(llm.images) == before   # nada a refazer
+    ctx.force = {"img-personagem-anna-corpo"}
+    ctx.overrides = {"img-personagem-anna-corpo": "Anna com casaco azul."}
+    run(ctx, "character_images")
+    assert len(llm.images) == before + 1 and "casaco azul" in llm.images[-1]["prompt"]

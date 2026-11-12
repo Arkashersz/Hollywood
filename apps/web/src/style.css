@@ -348,3 +348,9 @@ footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wr
 .confirmdel { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .confirmdel small { color: var(--muted); }
 .detailtop { flex-wrap: wrap; }
+
+.fixitem { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface-2); margin: 10px 0; }
+.fixitem small { color: var(--muted); }
+.fixitem textarea, .regen textarea { width: 100%; border: 1px solid var(--line-strong); background: var(--bg); color: var(--text); border-radius: 8px; padding: 10px; font: 12.5px/1.5 ui-monospace, Menlo, Consolas, monospace; resize: vertical; }
+.fixitem button { justify-self: start; min-height: 36px; padding: 0 14px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font-weight: 600; font-size: 13px; display: inline-flex; align-items: center; gap: 7px; }
+.fixitem button:disabled { opacity: .45; }

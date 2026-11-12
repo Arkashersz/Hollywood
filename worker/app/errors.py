@@ -12,7 +12,10 @@ class Blocked(Exception):
         self.action = action or ACTIONS.get(code, "")
 
     def as_dict(self) -> dict:
-        return {"code": self.code, "message": self.message, "action": self.action, "blocked": True}
+        out = {"code": self.code, "message": self.message, "action": self.action, "blocked": True}
+        if getattr(self, "item", None):
+            out["item"] = self.item   # item que causou a parada: o painel deixa editar o prompt dele
+        return out
 
 
 ACTIONS = {

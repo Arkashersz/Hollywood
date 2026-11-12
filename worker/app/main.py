@@ -45,7 +45,8 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
               sink=sink, brain=brain_for(project_dir), images=images, video=video, stage_key=stage["stage_key"], version=stage["current_version"],
               feedback=inp.get("feedback"), max_clip=config.GROK_MAX_CLIP_SECONDS, whisper_model=config.WHISPER_MODEL,
               language=config.REFERENCE_LANGUAGE, plan=project.get("import_plan"), clone=project.get("mode") == "clone", image_concurrency=config.IMAGE_CONCURRENCY, video_concurrency=config.VIDEO_CONCURRENCY,
-              image_slots=(pools or {}).get("image"), video_slots=(pools or {}).get("video"), pilot_approved=bool((stage.get("payload") or {}).get("pilot_approved")), pause=lambda: asyncio.sleep(config.PAUSE_BETWEEN_ITEMS))
+              image_slots=(pools or {}).get("image"), video_slots=(pools or {}).get("video"), pilot_approved=bool((stage.get("payload") or {}).get("pilot_approved")),
+              overrides=dict((stage.get("payload") or {}).get("prompt_overrides") or {}), force=set(inp.get("force_items") or []), pause=lambda: asyncio.sleep(config.PAUSE_BETWEEN_ITEMS))
     regen = kind == "regen_item"
     db.update_stage(stage["id"], status="in_progress", remove=("error", "progress"))
     try:
@@ -67,6 +68,8 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
         traceback.print_exc()
         error = {"code": "HANDLER_ERROR", "message": f"{type(exc).__name__}: {exc}"[:600], "blocked": False,
                  "action": "Veja o terminal do worker para o detalhe e clique em Tentar novamente."}
+        if getattr(exc, "item", None):
+            error["item"] = exc.item
         db.update_stage(stage["id"], status="pending_review" if regen else "failed", remove=("progress",), patch={"error": error})
         db.finish_job(job["id"], "failed", error_code="HANDLER_ERROR", error_message=error["message"])
         ctx.log(f"Falha na etapa: {error['message']}", "error")

@@ -251,4 +251,38 @@ assert.equal((await q(`select * from project_stages where project_id=$1`, [copy.
 assert.equal((await q(`select * from jobs where project_id=$1`, [copy.id])).length, 0);
 step('delete_project: só o dono, não durante uma tarefa em andamento, e apaga tudo em cascata');
 
+// --- ajustar item depois de aprovada / parada ------------------------------------
+await as(A);
+const [ap] = await q(`select * from create_project_from_plan('Ajuste', null, $1::jsonb)`, [JSON.stringify({ scene_images: [{ name: 'a', prompt: 'p' }] })]);
+await as(null, 'service_role');
+const [gs] = await q(`select * from project_stages where project_id=$1 and stage_key='scene_images'`, [ap.id]);
+await db.query(`update jobs set status='succeeded' where project_id=$1`, [ap.id]);
+await db.query(`update project_stages set status='failed', payload=payload||'{"error":{"code":"X","message":"m"}}'::jsonb where id=$1`, [gs.id]);
+await as(B);
+await fails(`select adjust_item($1,'img-cena-a','novo')`, [gs.id], /Stage not found/);
+await as(A);
+await fails(`select adjust_item($1,'  ','novo')`, [gs.id], /Informe o item/);
+await fails(`select adjust_item((select id from project_stages where project_id=$1 and stage_key='script'),'x')`, [ap.id], /não tem imagens ou vídeos/);
+let [adj] = await q(`select * from adjust_item($1,'img-cena-a','prompt novo')`, [gs.id]);
+assert.equal(adj.status, 'queued');
+assert.equal(adj.payload.error, undefined);
+assert.equal(adj.payload.prompt_overrides['img-cena-a'], 'prompt novo');
+let jb = (await q(`select * from jobs where stage_id=$1 and status='queued'`, [gs.id]))[0];
+assert.equal(jb.job_type, 'run_stage');
+assert.deepEqual(jb.input.force_items, ['img-cena-a']);
+await fails(`select adjust_item($1,'img-cena-a','outro')`, [gs.id], /não pode ser ajustada agora/);
+// etapa já aprovada: refaz só o item e volta para revisão
+await as(null, 'service_role');
+await db.query(`update jobs set status='succeeded' where stage_id=$1`, [gs.id]);
+await db.query(`update project_stages set status='approved' where id=$1`, [gs.id]);
+await as(A);
+[adj] = await q(`select * from adjust_item($1,'img-cena-a',null,'mais claro')`, [gs.id]);
+assert.equal(adj.status, 'queued');
+assert.equal(adj.payload.prompt_overrides['img-cena-a'], 'prompt novo', 'prompt anterior é mantido quando não se envia outro');
+jb = (await q(`select * from jobs where stage_id=$1 and status='queued'`, [gs.id]))[0];
+assert.equal(jb.job_type, 'regen_item');
+assert.equal(jb.input.item_key, 'img-cena-a');
+assert.equal(jb.input.comment, 'mais claro');
+step('adjust_item: etapa parada refaz o item e segue; etapa aprovada refaz só o item; só o dono');
+
 console.log('Todas as verificações de SQL passaram.');

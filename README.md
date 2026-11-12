@@ -69,7 +69,7 @@ O Claude só escreve o prompt e a duração de cada clipe. Quem opera o Grok é 
 
 **Dentro de um projeto:**
 
-Dentro de uma etapa, o worker gera vários itens ao mesmo tempo, cada um numa aba própria do Chrome do worker: `IMAGE_CONCURRENCY=3` (padrão) para imagens do ChatGPT e `VIDEO_CONCURRENCY=1` para vídeos do Grok (1 a 4; 1 = um por vez). Itens que dependem de outros (cenas que usam os ambientes; clipes que continuam do anterior) esperam a sua vez. Se um item para por login, limite ou erro, nenhum novo começa, os que já estavam em andamento terminam e tudo o que saiu é mantido ao tentar de novo. Dentro de um mesmo projeto, as etapas de texto do Claude continuam uma por vez.
+Dentro de uma etapa, o worker gera vários itens ao mesmo tempo, cada um numa aba própria do Chrome do worker: `IMAGE_CONCURRENCY=3` (padrão; aceita até 10) para imagens do ChatGPT e `VIDEO_CONCURRENCY=1` para vídeos do Grok (1 a 4; 1 = um por vez). Itens que dependem de outros (cenas que usam os ambientes; clipes que continuam do anterior) esperam a sua vez. Se um item para por login, limite ou erro, nenhum novo começa, os que já estavam em andamento terminam e tudo o que saiu é mantido ao tentar de novo. Dentro de um mesmo projeto, as etapas de texto do Claude continuam uma por vez.
 
 ## Dois modos de roteiro
 
@@ -79,6 +79,10 @@ Ao enviar o link você escolhe:
 - **Cópia fiel**: roteiro, quantidade de cenas e cortes, durações, falas e câmera idênticos ao original; só muda o personagem/elemento central (banana → morango) e o que depende dele. A análise gera um mapa plano a plano (câmera exata de cada corte) que o roteiro, as imagens e os prompts de vídeo copiam. Na etapa do roteiro o Claude escreve a versão 100% fiel e, na seção 7, propõe a troca de alguns **blocos de cena** (só o local, nunca a história). Aprovar mantém 100% fiel; para aplicar a troca, peça revisão escrevendo “aplicar a troca” (ou diga quais blocos). A regra de “acima de 70 s” não vale: a duração segue a do original.
 
 Exige a migração `0007_clone_mode.sql` (SQL Editor do Supabase).
+
+## Ajustar imagens e vídeos a qualquer momento
+
+Nas etapas de imagens e vídeos, cada item tem o botão **Ajustar**, com a etapa parada, em revisão ou já aprovada. Dá para editar o prompt do item e gerar só ele de novo (a etapa volta para a sua revisão). Quando uma etapa para porque um item não pôde ser criado, o painel mostra esse item com o prompt editável e **Salvar prompt e tentar de novo** continua dali, mantendo o que já saiu. Exige a migração `0009_adjust_item.sql`.
 
 ## Quando uma etapa para
 
