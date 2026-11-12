@@ -87,7 +87,10 @@ def clip_prompt(bible: dict, clip: dict) -> str:
     chars = {c["name"]: c for c in bible["characters"]}
     voices = "\n".join(f"- {n}: {chars[n]['voice']['descriptor_en']}" for n in clip["speakers"])
     voice_block = f"\n\nVoices (keep identical in every clip):\n{voices}" if voices else ""
-    return f"{clip['prompt']}{voice_block}\n\nDuration: {clip['duration_s']} seconds. Vertical 9:16."
+    cast = [chars[n] for n in clip.get("cast") or [] if n in chars and not chars[n]["voice_only"]]
+    look = ("\n\nCharacter consistency (each character must look EXACTLY like the attached reference images in every frame: same face, hair, outfit, colors and accessories "
+            "such as glasses or hats; change nothing unless the action above says so):\n" + "\n".join(f"- {c['name']}: {c['fixed_description']}" for c in cast)) if cast else ""
+    return f"{clip['prompt']}{voice_block}{look}\n\nDuration: {clip['duration_s']} seconds. Vertical 9:16."
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +127,8 @@ def doc04(bible: dict) -> str:
     parts = ["## Bloco de estilo global", "Colado, idêntico, em todos os prompts de imagem.", _code(bible["style_block"]), bible["style_explanation_pt"]]
     for ch in bible["characters"]:
         parts += [f"## {ch['name']}", f"**Papel:** {ch['role_pt'] or NA}"]
+        if ch.get("reused"):
+            parts.append("**Já existe (parte anterior):** descrição, voz e imagem reaproveitadas; este personagem não é gerado de novo.")
         if ch["voice_only"]:
             parts.append("Personagem só de voz (sem imagem). Veja o Documento 06.")
             continue
@@ -166,6 +171,8 @@ def doc07(bible: dict, plan: dict) -> str:
         "## 2. Environment / Set Design", f"| Ambiente | Descrição | Arquivo |\n| --- | --- | --- |\n{env_rows}",
     ]
     for e in plan["environments"]:
+        if e.get("reused"):
+            parts.append("**Já existe (parte anterior):** a imagem deste ambiente é reaproveitada e não é gerada de novo.")
         parts += [f"### {e['name']}", "**Descrição fixa:**", _code(e["fixed_description"]), "**Prompt:**", _code(environment_prompt(bible, e))]
     parts += [
         "## 3. Lighting / Mood / Style", a["lighting_mood_style_pt"], "**Bloco de estilo global:**", _code(bible["style_block"]),

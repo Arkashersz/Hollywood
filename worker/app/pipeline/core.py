@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from ..errors import Blocked
 from ..media import slugify, snap_duration
-from . import prompts
+from . import prompts, render
 
 DOCS = {
     "01": ("01-ficha-da-referencia.md", "Documento 01 · Ficha da referência"),
@@ -138,14 +139,44 @@ class Ctx:
         path.write_text(json.dumps(self._generated, indent=1), encoding="utf-8")
 
 
+def _merge_by_name(base: list, newer: list) -> list:
+    out = {str(x["name"]).casefold(): x for x in base}
+    out.update({str(x["name"]).casefold(): x for x in newer})
+    return list(out.values())
+
+
+def _build_library(parent: Path, mine: Path) -> None:
+    """Biblioteca da série: personagens, folhas e ambientes que já existem (imagens e textos), acumulados de todas as partes anteriores.
+    Os arquivos usam os mesmos nomes de sempre (personagem-<nome>-corpo, folha-<nome>, ambiente-<nome>)."""
+    lib = mine / "biblioteca"
+    index = {"style_block": "", "characters": [], "environments": []}
+    older = parent / "dados" / "biblioteca.json"
+    if older.is_file():
+        index = json.loads(older.read_text(encoding="utf-8"))
+        if (parent / "biblioteca" / "imagens").is_dir():
+            shutil.copytree(parent / "biblioteca" / "imagens", lib / "imagens", dirs_exist_ok=True)
+    bible, plan = parent / "dados" / "bible.json", parent / "dados" / "plan.json"
+    if bible.is_file():
+        b = json.loads(bible.read_text(encoding="utf-8"))
+        index["style_block"] = b.get("style_block") or index["style_block"]
+        index["characters"] = _merge_by_name(index["characters"], b.get("characters") or [])
+    if plan.is_file():
+        index["environments"] = _merge_by_name(index["environments"], json.loads(plan.read_text(encoding="utf-8")).get("environments") or [])
+    for sub in ("personagens", "folhas", "ambientes"):
+        if (parent / "imagens" / sub).is_dir():
+            shutil.copytree(parent / "imagens" / sub, lib / "imagens" / sub, dirs_exist_ok=True)
+    (mine / "dados").mkdir(parents=True, exist_ok=True)
+    (mine / "dados" / "biblioteca.json").write_text(json.dumps(index, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
 def sequel_context(project: dict, projects_dir: Path) -> dict | None:
-    """Contexto de uma continuação. A história até aqui é copiada para a pasta do projeto na primeira vez,
-    então apagar o projeto anterior depois não quebra a parte 2."""
+    """Contexto de uma continuação. A história e a biblioteca da série (personagens e ambientes já criados) são copiadas para a
+    pasta do projeto na primeira vez, então apagar o projeto anterior depois não quebra a parte 2."""
     parent_id = project.get("parent_id")
     if not parent_id:
         return None
     mine = projects_dir / str(project["id"])
-    story_file, chars_file, doc02_file = mine / "historia-anterior.md", mine / "dados" / "personagens-anteriores.json", mine / "dados" / "edicao-anterior.md"
+    story_file, doc02_file, index_file = mine / "historia-anterior.md", mine / "dados" / "edicao-anterior.md", mine / "dados" / "biblioteca.json"
     part = int(project.get("part") or 2)
     if not story_file.is_file():
         parent = projects_dir / str(parent_id)
@@ -156,18 +187,57 @@ def sequel_context(project: dict, projects_dir: Path) -> dict | None:
         earlier = (parent / "historia-anterior.md").read_text(encoding="utf-8") if (parent / "historia-anterior.md").is_file() else ""
         story = (earlier.strip() + f"\n\n# PARTE {part - 1}\n\n" + script.read_text(encoding="utf-8")[:9000]).strip()
         mine.mkdir(parents=True, exist_ok=True)
-        chars_file.parent.mkdir(parents=True, exist_ok=True)
+        _build_library(parent, mine)
         story_file.write_text(story, encoding="utf-8")
-        bible = parent / "dados" / "bible.json"
-        if bible.is_file():
-            chars_file.write_text(json.dumps(json.loads(bible.read_text(encoding="utf-8")).get("characters") or [], ensure_ascii=False, indent=1), encoding="utf-8")
         edit = parent / DOCS["02"][0]
         if edit.is_file():
             doc02_file.write_text(edit.read_text(encoding="utf-8"), encoding="utf-8")
+    library = json.loads(index_file.read_text(encoding="utf-8")) if index_file.is_file() else {"style_block": "", "characters": [], "environments": []}
     return {"part": part, "notes": project.get("sequel_notes"), "story": story_file.read_text(encoding="utf-8"),
-            "characters": json.loads(chars_file.read_text(encoding="utf-8")) if chars_file.is_file() else [],
+            "characters": library["characters"], "environments": library["environments"], "style_block": library.get("style_block") or "",
+            "library": str(mine / "biblioteca"),
             "has_ref": bool(project.get("source_url") or project.get("source_video_path")),
             "doc02": doc02_file.read_text(encoding="utf-8") if doc02_file.is_file() else None}
+
+
+def adopt_bible(bible: dict, sequel: dict | None) -> list[str]:
+    """Numa continuação, personagem que já existe volta IDÊNTICO (descrição, acessórios, voz, estilo) e a imagem dele é reaproveitada.
+    Devolve os nomes reaproveitados. Quem não existia segue o fluxo normal e é criado."""
+    if not sequel:
+        return []
+    known = {str(c["name"]).casefold(): c for c in sequel.get("characters") or []}
+    if sequel.get("style_block"):
+        bible["style_block"] = sequel["style_block"]
+    names = []
+    for c in bible["characters"]:
+        old = known.get(c["name"].casefold())
+        c["reused"] = False
+        if old is None:
+            continue
+        for key in ("slug", "fixed_description", "voice_only", "never_change_pt", "expressions", "details", "voice"):
+            c[key] = old[key]
+        c["reused"] = bool(old["voice_only"]) or (Path(sequel["library"]) / render.body_path(old)).is_file()
+        if c["reused"]:
+            names.append(c["name"])
+    return names
+
+
+def adopt_plan(plan: dict, sequel: dict | None) -> list[str]:
+    """Idem para os ambientes: o que já existe volta igual e a imagem é reaproveitada."""
+    if not sequel:
+        return []
+    known = {str(e["name"]).casefold(): e for e in sequel.get("environments") or []}
+    names = []
+    for e in plan["environments"]:
+        old = known.get(e["name"].casefold())
+        e["reused"] = False
+        if old is None:
+            continue
+        e["slug"], e["fixed_description"] = old["slug"], old["fixed_description"]
+        e["reused"] = (Path(sequel["library"]) / render.env_path(old)).is_file()
+        if e["reused"]:
+            names.append(e["name"])
+    return names
 
 
 def strip_leading_title(markdown: str) -> str:
@@ -317,6 +387,7 @@ def validate_plan(raw: dict, bible: dict) -> dict:
 def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int, catalog: set[str] | None = None, min_total: int = 70) -> dict:
     scene_ids = {s["id"] for s in plan["scenes"]}
     names = {c["name"].casefold(): c["name"] for c in bible["characters"]}
+    cast_of = {s["id"]: list(s.get("characters") or []) for s in plan["scenes"]}
     clips_raw = raw.get("clips")
     if not isinstance(clips_raw, list) or not clips_raw:
         raise ValueError('"clips" precisa ter pelo menos um clipe')
@@ -350,7 +421,7 @@ def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int, catalog: s
                 raise ValueError(f'{where}: "reference_images" precisa ter de 1 a 3 ids diferentes')
             if not refs and start != "previous_last_frame":
                 raise ValueError(f'{where}: informe em "reference_images" a(s) imagem(ns) deste clipe (a primeira é o quadro inicial)')
-        clips.append({"n": i, "scene": scene, "duration_s": duration, "start": start, "reference_images": refs, "prompt": _text(c, "prompt", where),
+        clips.append({"n": i, "scene": scene, "cast": cast_of.get(scene, []), "duration_s": duration, "start": start, "reference_images": refs, "prompt": _text(c, "prompt", where),
                       "speakers": speakers, "dialogue_de": _text(c, "dialogue_de", where, required=False),
                       "dialogue_pt": _text(c, "dialogue_pt", where, required=False),
                       "continuity_pt": _text(c, "continuity_pt", where, required=False), "check_pt": _strings(c, "check_pt")})

@@ -577,3 +577,71 @@ def test_sequel_with_a_link_analyzes_the_new_video_and_continues_the_story(proje
     run(ctx, "script")
     script = llm.asks[-1]["prompt"]
     assert "CONTINUAÇÃO · PARTE 2" in script and "PARTE 2 do original" in script and "Anna und der Hund" in script
+
+
+def _child(project, parent_dir_ctx, notes=None):
+    """Contexto de uma continuação (sem link) do projeto produzido em `project`."""
+    ctx, llm, video, _ = project
+    projects_dir, parent_id = ctx.dir.parent, ctx.project_id
+    sequel = core.sequel_context({"id": "p2", "parent_id": parent_id, "part": 2, "sequel_notes": notes, "source_url": None}, projects_dir)
+    child = Ctx(project_id="p2", source="", dir=projects_dir / "p2", sink=LocalSink(), brain=llm, images=llm, video=video, max_clip=6, sequel=sequel)
+    return child, llm
+
+
+def test_sequel_reuses_existing_character_and_environment_images_instead_of_generating_them(project, tmp_path):
+    parent, llm, _, _ = project
+    run_until(parent, "scene_images")
+    child, _ = _child(project, parent)
+    run(child, "analysis"); run(child, "script"); run(child, "character_bible")
+    assert child.load_data("bible")["characters"][0]["reused"]
+    before = len(llm.images)
+    out = run(child, "character_images")
+    assert len(llm.images) == before, "personagem que já existe não é gerado de novo"
+    assert (child.dir / "imagens/personagens/personagem-anna-corpo.png").is_file() and "reaproveitada" in out["summary"]
+    run(child, "character_sheets")
+    assert len(llm.images) == before
+    run(child, "visual_plan")
+    out = run(child, "scene_images")
+    new = llm.images[before:]
+    assert new and not any(i["out"].startswith("ambiente-") for i in new), "ambiente que já existe não é gerado de novo"
+    assert all(i["out"].startswith("cena-") for i in new) and "reaproveitada" in out["summary"]
+    assert "Já existe (parte anterior)" in child.read_doc("04")
+
+
+def test_returning_characters_keep_their_exact_look_and_new_ones_are_created(project, tmp_path):
+    parent, _, _, _ = project
+    run_until(parent, "character_images")
+    child, _ = _child(project, parent)
+    bible = core.validate_bible({"style_block": "OUTRO ESTILO", "characters": [
+        {"name": "Anna", "fixed_description": "A teenager with blue hair.", "voice": {"descriptor_en": "x"}},
+        {"name": "Drache", "fixed_description": "A small green dragon.", "voice": {"descriptor_en": "y"}}]})
+    reused = core.adopt_bible(bible, child.sequel)
+    anna, dragon = bible["characters"]
+    assert reused == ["Anna"] and anna["reused"] and not dragon["reused"]
+    assert anna["fixed_description"] == "A 30-year-old woman, red coat." and "casaco vermelho" in anna["never_change_pt"]
+    assert bible["style_block"] == parent.load_data("bible")["style_block"]
+    plan = {"environments": [{"name": "Neuer Ort", "slug": "neuer-ort", "fixed_description": "d"}]}
+    assert core.adopt_plan(plan, child.sequel) == [] and not plan["environments"][0]["reused"]
+
+
+def test_hook_ending_and_consistency_rules_reach_the_script_bible_and_clip_prompts(project):
+    ctx, llm, _, _ = project
+    run_until(ctx, "video_prompts")
+    asks = [a["prompt"] for a in llm.asks]
+    script = next(p for p in asks if "TAREFA: você é o ROTEIRISTA" in p)
+    for marker in ("GANCHO (0–3 s)", "FINAL (últimos 3–5 s)", "CONSISTÊNCIA (zero erro)", "TRÊS ganchos alternativos", "TRÊS finais alternativos", "pergunta para os comentários"):
+        assert marker in script, marker
+    assert "CONSISTÊNCIA (zero erro)" in next(p for p in asks if "CINEGRAFISTA" in p)
+    clips_prompt = next(p for p in asks if "você é o EDITOR" in p)
+    assert "GANCHO E FINAL NOS CLIPES" in clips_prompt and "Último clipe" in clips_prompt
+    assert any("Gancho e final na edição" in p for p in asks) and any("Comentários" in p and "comentário fixado" in p for p in asks)
+    clip = stages.items_for(ctx, "production")[0]
+    assert "Character consistency" in clip.prompt and "A 30-year-old woman, red coat." in clip.prompt
+
+
+def test_clone_keeps_the_original_hook_and_ending_but_asks_for_an_evaluation(project):
+    ctx, llm, _, _ = project
+    ctx.clone = True
+    run(ctx, "analysis"); run(ctx, "script")
+    script = next(a["prompt"] for a in llm.asks if "ROTEIRISTA do REMAKE FIEL" in a["prompt"])
+    assert "Avaliação do gancho e do final" in script and "TRÊS ganchos alternativos" not in script

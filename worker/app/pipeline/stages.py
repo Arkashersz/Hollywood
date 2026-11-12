@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -18,7 +19,7 @@ from .. import media
 from ..media import slugify
 from ..errors import Blocked
 from . import prompts, render
-from .core import Ctx, ask_json, strip_leading_title, validate_bible, validate_clips, validate_plan
+from .core import Ctx, adopt_bible, adopt_plan, ask_json, strip_leading_title, validate_bible, validate_clips, validate_plan
 
 ORDER = ["analysis", "script", "character_bible", "character_images", "character_sheets",
          "visual_plan", "scene_images", "video_prompts", "production"]
@@ -200,13 +201,18 @@ async def character_bible(ctx: Ctx) -> dict:
     prompt = prompts.bible(ctx.read_doc("01"), ctx.read_doc("03"), _previous_data(ctx, "bible"), ctx.feedback, ctx.clone, ctx.sequel)
     ctx.log("Pedindo personagens, estilo e vozes ao Claude…")
     bible = await ask_json(ctx.brain, prompt, validate_bible)
+    reused = adopt_bible(bible, ctx.sequel)
+    if reused:
+        ctx.log(f"Já existem e voltam idênticos (sem gerar de novo): {', '.join(reused)}.")
     ctx.save_data("bible", bible)
     ctx.write_doc("04", render.doc04(bible))
     ctx.write_doc("05", render.doc05(bible))
     ctx.write_doc("06", render.doc06(bible))
-    count = len(render.visible(bible))
-    return {"summary": f"{len(bible['characters'])} personagem(ns) definidos, com estilo global e vozes.",
-            "next_generation": {"service": "ChatGPT", "count": count, "unit": "imagens de corpo inteiro"}}
+    count = len([c for c in render.visible(bible) if not c.get("reused")])
+    new = [c["name"] for c in bible["characters"] if not c.get("reused")]
+    note = f" Reaproveitados da parte anterior: {', '.join(reused)}. Novos: {', '.join(new) or 'nenhum'}." if reused else ""
+    return {"summary": f"{len(bible['characters'])} personagem(ns) definidos, com estilo global e vozes.{note}",
+            "next_generation": {"service": "ChatGPT", "count": count, "unit": "imagens de corpo inteiro" + (" novas" if reused else "")}}
 
 
 # ---------------------------------------------------------------------------
@@ -288,23 +294,43 @@ def _meta(item: Item) -> dict:
     return meta
 
 
+REUSED = " (da parte anterior)"
+
+
+def _adopt(ctx: Ctx, key: str, rel: Path, reused: bool) -> str:
+    """Continuação: copia da biblioteca da série a imagem que já existe, para ela não ser gerada de novo. Devolve o sufixo do nome."""
+    if not reused or not ctx.sequel:
+        return ""
+    src, dest = Path(ctx.sequel["library"]) / rel, ctx.dir / rel
+    if src.is_file() and not dest.is_file():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dest)
+        ctx.mark_generated(key)
+    return REUSED if src.is_file() or dest.is_file() else ""
+
+
+def _reused_count(items: list[Item]) -> str:
+    n = sum(1 for i in items if i.name.endswith(REUSED))
+    return f" {n} reaproveitada(s) da parte anterior (não geradas de novo)." if n else ""
+
+
 def _character_items(ctx: Ctx) -> list[Item]:
     bible = ctx.load_data("bible")
-    return [Item(f"img-personagem-{c['slug']}-corpo", f"{c['name']} · corpo inteiro", ctx.dir / render.body_path(c),
-                 render.full_body_prompt(bible, c), lambda: []) for c in render.visible(bible)]
+    return [Item(f"img-personagem-{c['slug']}-corpo", f"{c['name']} · corpo inteiro" + _adopt(ctx, f"img-personagem-{c['slug']}-corpo", render.body_path(c), c.get("reused", False)),
+                 ctx.dir / render.body_path(c), render.full_body_prompt(bible, c), lambda: []) for c in render.visible(bible)]
 
 
 def _sheet_items(ctx: Ctx) -> list[Item]:
     bible = ctx.load_data("bible")
-    return [Item(f"img-folha-{c['slug']}", f"{c['name']} · folha 16:9", ctx.dir / render.sheet_path(c),
-                 render.sheet_prompt(bible, c), lambda c=c: [ctx.dir / render.body_path(c)]) for c in render.visible(bible)]
+    return [Item(f"img-folha-{c['slug']}", f"{c['name']} · folha 16:9" + _adopt(ctx, f"img-folha-{c['slug']}", render.sheet_path(c), c.get("reused", False)),
+                 ctx.dir / render.sheet_path(c), render.sheet_prompt(bible, c), lambda c=c: [ctx.dir / render.body_path(c)]) for c in render.visible(bible)]
 
 
 def _scene_items(ctx: Ctx) -> list[Item]:
     bible, plan = ctx.load_data("bible"), ctx.load_data("plan")
     chars = {c["name"]: c for c in bible["characters"]}
     envs = {e["name"]: e for e in plan["environments"]}
-    items = [Item(f"img-ambiente-{e['slug']}", f"Ambiente · {e['name']}", ctx.dir / render.env_path(e),
+    items = [Item(f"img-ambiente-{e['slug']}", f"Ambiente · {e['name']}" + _adopt(ctx, f"img-ambiente-{e['slug']}", render.env_path(e), e.get("reused", False)), ctx.dir / render.env_path(e),
                   render.environment_prompt(bible, e), lambda: []) for e in plan["environments"]]   # onda 0: as cenas usam estes ambientes
     for s in plan["scenes"]:
         refs = [ctx.dir / render.sheet_path(chars[n]) for n in s["characters"]] + [ctx.dir / render.env_path(envs[s["environment"]])]
@@ -372,13 +398,13 @@ async def character_images(ctx: Ctx) -> dict:
     items = items_for(ctx, "character_images")
     stats = await generate(ctx, items, note=ctx.feedback)
     nxt = _imported_next(ctx) if ctx.plan else {"next_generation": {"service": "ChatGPT", "count": len(items), "unit": "folhas 16:9"}}
-    return {"summary": f"{len(items)} imagem(ns) de corpo inteiro ({stats['made']} gerada(s) agora).", **nxt}
+    return {"summary": f"{len(items)} imagem(ns) de corpo inteiro ({stats['made']} gerada(s) agora).{_reused_count(items)}", **nxt}
 
 
 async def character_sheets(ctx: Ctx) -> dict:
     items = items_for(ctx, "character_sheets")
     stats = await generate(ctx, items, note=ctx.feedback)
-    return {"summary": f"{len(items)} folha(s) 16:9 ({stats['made']} gerada(s) agora).", **(_imported_next(ctx) if ctx.plan else {})}
+    return {"summary": f"{len(items)} folha(s) 16:9 ({stats['made']} gerada(s) agora).{_reused_count(items)}", **(_imported_next(ctx) if ctx.plan else {})}
 
 
 # ---------------------------------------------------------------------------
@@ -386,20 +412,22 @@ async def character_sheets(ctx: Ctx) -> dict:
 # ---------------------------------------------------------------------------
 async def visual_plan(ctx: Ctx) -> dict:
     bible = ctx.load_data("bible")
-    prompt = prompts.visual_plan(ctx.read_doc("03"), bible, _previous_data(ctx, "plan"), ctx.feedback, ctx.clone)
+    prompt = prompts.visual_plan(ctx.read_doc("03"), bible, _previous_data(ctx, "plan"), ctx.feedback, ctx.clone, ctx.sequel)
     ctx.log("Pedindo ambientes e imagens-base ao Claude…")
     plan = await ask_json(ctx.brain, prompt, lambda raw: validate_plan(raw, bible))
+    reused = adopt_plan(plan, ctx.sequel)
     ctx.save_data("plan", plan)
     ctx.write_doc("07", render.doc07(bible, plan))
-    count = len(plan["environments"]) + len(plan["scenes"])
-    return {"summary": f"{len(plan['environments'])} ambiente(s) e {len(plan['scenes'])} cena(s) planejados nas oito áreas.",
+    count = len([e for e in plan["environments"] if not e.get("reused")]) + len(plan["scenes"])
+    note = f" Ambientes reaproveitados da parte anterior: {', '.join(reused)}." if reused else ""
+    return {"summary": f"{len(plan['environments'])} ambiente(s) e {len(plan['scenes'])} cena(s) planejados nas oito áreas.{note}",
             "next_generation": {"service": "ChatGPT", "count": count, "unit": "imagens de ambiente e cena"}}
 
 
 async def scene_images(ctx: Ctx) -> dict:
     items = items_for(ctx, "scene_images")
     stats = await generate(ctx, items, note=ctx.feedback)
-    return {"summary": f"{len(items)} imagem(ns) de ambiente e cena ({stats['made']} gerada(s) agora).", **(_imported_next(ctx) if ctx.plan else {})}
+    return {"summary": f"{len(items)} imagem(ns) de ambiente e cena ({stats['made']} gerada(s) agora).{_reused_count(items)}", **(_imported_next(ctx) if ctx.plan else {})}
 
 
 # ---------------------------------------------------------------------------

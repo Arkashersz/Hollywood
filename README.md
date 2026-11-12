@@ -87,7 +87,14 @@ Quando um projeto fica **Concluído**, aparece o botão **Criar parte 2** (depoi
 - **Sem link**: o Claude resume a história até aqui, lista os fios soltos e propõe três direções para a continuação (a primeira etapa mostra isso; escolha uma pedindo revisão, ou aprove para seguir a recomendada). A edição herda o estilo da parte anterior.
 - **Com o link da parte 2 do vídeo original**: o Claude analisa esse vídeo e escreve a continuação da *sua* história seguindo o que acontece nele (estrutura, acontecimentos, ritmo e gancho), sem copiar falas. Se o projeto anterior era "Cópia fiel", a continuação também é fiel ao novo vídeo.
 - Um campo opcional de **ideias** (o que você quer que aconteça) tem prioridade sobre as sugestões do Claude.
-- Personagens que já existiam mantêm nome, descrição e voz idênticos; as imagens deles são geradas de novo a partir da mesma descrição.
+- **Personagens e ambientes não são recriados.** Cada continuação recebe a biblioteca da série (todas as partes anteriores). Personagem ou ambiente que já existe, pelo mesmo nome, volta com descrição, acessórios, voz e estilo idênticos e a imagem é copiada, sem passar pelo ChatGPT (aparece como "da parte anterior"). Só o que é novo é gerado. Os arquivos seguem sempre o mesmo padrão: `personagem-<nome>-corpo.png`, `folha-<nome>.png` e `ambiente-<nome>.png`.
+
+## Gancho, final e consistência
+
+Em todo roteiro (exceto "Cópia fiel", que mantém os do original e só avalia com nota) o Claude é obrigado a:
+- **Gancho (3 s):** começar no meio da ação, escrever 3 ganchos com nota de 1 a 10 e usar o melhor (nota 8 ou mais); o clipe 1 carrega o impacto nos primeiros 3 s.
+- **Final:** terminar num cliffhanger, escrever 3 finais com nota, definir a pergunta para os comentários e preparar a parte seguinte; o kit de publicação traz legenda e comentário fixado e o plano de edição traz a montagem dos 3 s iniciais e dos finais.
+- **Consistência:** acessórios e cores entram na descrição fixa do personagem, que é repetida em cada prompt de vídeo, junto com as imagens de referência.
 
 ## Ajustar imagens e vídeos a qualquer momento
 

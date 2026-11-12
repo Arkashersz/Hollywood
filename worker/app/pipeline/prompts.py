@@ -59,6 +59,34 @@ Escreva o Documento 03 · Roteiro (fiel) com estas seções:
 {md_out}"""
 
 
+HOOK_RULES = """GANCHO (0–3 s) — o coração do vídeo; obrigatório e polido ao máximo:
+- Os 3 primeiros segundos precisam chocar, intrigar ou criar uma curiosidade irresistível. Comece NO MEIO da ação, no auge ou na consequência de algo; nunca em apresentação, cumprimento, paisagem, título, logo ou fade-in.
+- No primeiro segundo já existe algo que prende o olhar (imagem impossível, perigo, conflito, segredo, contradição) e, até o segundo 3, o espectador tem uma pergunta na cabeça que só o resto do vídeo responde.
+- Texto na tela (DE) curto nos primeiros 1–2 s, reforçando a curiosidade; a primeira fala (se houver) com no máximo 6 palavras.
+- Escreva TRÊS ganchos alternativos (descrição visual, fala, texto na tela e por que prende), dê nota de 1 a 10 a cada um por choque e curiosidade, e use no roteiro o de maior nota. Só aceite nota 8 ou mais; se nenhum chegar lá, reescreva até chegar.
+- O Grok gera clipes de no mínimo 6 s: o primeiro clipe carrega o gancho nos seus primeiros 3 s e a edição corta ali."""
+
+ENDING_RULES = """FINAL (últimos 3–5 s) — o outro coração do vídeo; obrigatório e polido ao máximo:
+- Termine no ponto de maior tensão ou revelação parcial: um cliffhanger forte, que faça o público querer a parte seguinte e comentar. Nada de encerramento morno, resumo ou moral da história.
+- A última imagem e a última fala deixam uma pergunta aberta (quem é, o que acontece agora, o que há atrás da porta?), sem resolver o conflito principal.
+- Texto final na tela (DE) com chamada para a ação ligada à história e convite para a parte 2 (ex.: "Teil 2? Schreib es in die Kommentare!").
+- Escreva TRÊS finais alternativos, dê nota de 1 a 10 a cada um por tensão e por vontade de ver a parte seguinte e comentar, e use o de maior nota (8 ou mais).
+- Defina a "pergunta para os comentários": simples, que divide opiniões e que qualquer pessoa queira responder."""
+
+CONSISTENCY_RULES = """CONSISTÊNCIA (zero erro): cada personagem e cada ambiente é idêntico em todas as imagens e vídeos. Tudo que o personagem veste ou carrega (óculos, boné, colar, cicatriz, cores exatas) faz parte da descrição fixa e aparece em TODA cena, a menos que a história mostre explicitamente que ele perdeu ou trocou o item (e então o roteiro diz em qual cena e a partir de quando)."""
+
+
+def sequel_environments(sequel: dict | None) -> str:
+    envs = (sequel or {}).get("environments") or []
+    if not envs:
+        return ""
+    listed = [{"name": e["name"], "fixed_description": e["fixed_description"]} for e in envs]
+    return f"""
+Ambientes já existentes (CONTINUAÇÃO): se uma cena acontece num destes lugares, use o MESMO nome exato em "environments" e copie a "fixed_description" sem mudar uma palavra; a imagem desse ambiente já existe e não será gerada de novo. Crie um ambiente novo só se a história levar a um lugar novo.
+{data('ambientes-anteriores', json.dumps(listed, ensure_ascii=False, indent=1))}
+"""
+
+
 def data(label: str, content: str) -> str:
     return f"<dados nome=\"{label}\">\n{content.strip()}\n</dados>"
 
@@ -163,7 +191,7 @@ def sequel_block(sequel: dict | None) -> str:
 
 CONTINUAÇÃO · PARTE {sequel['part']}: este vídeo continua uma história já produzida. O roteiro anterior está abaixo; o novo roteiro começa DEPOIS dele, sem repeti-lo.
 - Mantenha os mesmos personagens (nomes, personalidade e relações), o mesmo mundo e as regras já estabelecidas.
-- Comece retomando o fim da parte anterior (uma frase de recapitulação visual ou falada, no máximo) e termine com novo gancho ou conclusão digna de parte {sequel['part']}.
+- O gancho dos 3 primeiros segundos mostra a CONSEQUÊNCIA IMEDIATA do final da parte anterior (sem recapitulação longa) e termina com um final forte que prepara a parte {sequel['part'] + 1}.
 - {ref}{notes}
 
 {data('historia-ate-agora', sequel['story'])}
@@ -202,7 +230,7 @@ def doc03(doc01_md: str, doc02_md: str, max_clip: int, previous: str | None, fee
     if clone:
         return CLONE_BASE + "\n\n" + CLONE_SCRIPT.format(
             doc01=data('documento-01-ficha-da-referencia', doc01_md), doc02=data('documento-02-edicao-da-referencia', doc02_md),
-            rules=CLONE_RULES + f"\n- O Grok gera clipes de exatamente 6, 10 ou 15 s (máximo {max_clip} s por clipe); um plano mais longo vira clipes encadeados (\"7a\", \"7b\").",
+            rules=CLONE_RULES + "\n- Gancho e final do original são copiados fielmente. Na seção de dúvidas acrescente \"Avaliação do gancho e do final\": nota de 1 a 10 para o gancho (3 s) e para o final do original, por choque, curiosidade e vontade de ver a parte 2; se algum tiver nota abaixo de 8, sugira (sem aplicar) uma versão mais forte para o usuário decidir.\n" + f"- O Grok gera clipes de exatamente 6, 10 ou 15 s (máximo {max_clip} s por clipe); um plano mais longo vira clipes encadeados (\"7a\", \"7b\").",
             revision=sequel_block(sequel) + revision(previous, feedback), md_out=MD_OUT)
     return f"""{BASE}
 
@@ -223,13 +251,20 @@ Duração (obrigatória):
 
 Alemão: natural, de falante nativo, "du" como padrão; frases curtas, boas para voz de IA; números por extenso; sem siglas; expressões adaptadas, não traduzidas ao pé da letra. Texto na tela em alemão, curto. Conteúdo adequado às regras do TikTok.
 
+{HOOK_RULES}
+
+{ENDING_RULES}
+
+{CONSISTENCY_RULES}
+
 Escreva o Documento 03 · Roteiro com estas seções:
 ## 1. Cabeçalho — título de trabalho, logline (DE e PT), tom, tipo de áudio, personagens (nome, papel e uma linha cada).
 ## 2. Mapa referência → novo — o que foi mantido e o que mudou.
 ## 3. Tabela de cenas — Cena · Início–Fim · Duração · Visual (PT) · Fala ou narração (DE) · Tradução (PT) · Texto na tela (DE) · Âncora de origem · Ritmo e áudio.
 ## 4. Conta da duração.
 ## 5. Texto corrido — em alemão e a tradução em português.
-## 6. Dúvidas ao usuário.
+## 6. Gancho e final — os três ganchos e os três finais com nota e a escolha; o que acontece nos 3 primeiros segundos, segundo a segundo; o final dos últimos 5 s; a pergunta para os comentários; e o que a parte seguinte promete.
+## 7. Dúvidas ao usuário.
 {sequel_block(sequel)}{revision(previous, feedback)}
 {MD_OUT}"""
 
@@ -265,13 +300,16 @@ Devolva este objeto:
  ]
 }}
 
+{CONSISTENCY_RULES}
+Em "fixed_description" liste CADA acessório e cor exata (óculos, boné, joias, cicatrizes, estampas) e repita os acessórios em "never_change_pt" (ex.: "sempre de óculos redondos e boné vermelho"). A descrição precisa bastar para qualquer pessoa desenhar o personagem sem errar nada.
+
 Inclua todos os personagens que aparecem no roteiro, inclusive um narrador sem corpo (nesse caso deixe "fixed_description" como "voice only" e as listas vazias). Não descreva voz nem aparência como imitação de pessoa real.
 {"No modo cópia fiel: um personagem novo para cada personagem do original (mesma quantidade, mesmos papéis e relações, mesma proporção e energia), trocando só o elemento central; o style_block deve reproduzir o estilo visual do original (tipo de render, paleta, luz, lente) o mais fiel possível." if clone else ""}
 {sequel_characters(sequel)}{revision(previous, feedback)}
 {JSON_OUT}"""
 
 
-def visual_plan(doc03_md: str, bible: dict, previous: str | None, feedback: str | None, clone: bool = False) -> str:
+def visual_plan(doc03_md: str, bible: dict, previous: str | None, feedback: str | None, clone: bool = False, sequel: dict | None = None) -> str:
     names = [c["name"] for c in bible["characters"]]
     return f"""{CLONE_BASE if clone else BASE}
 
@@ -307,8 +345,8 @@ Devolva este objeto:
  ]
 }}
 
-Uma entrada em "scenes" para cada cena (ou clipe encadeado que precise de imagem própria) do roteiro, na ordem. Ambientes recorrentes aparecem uma única vez em "environments".
-{CLONE_RULES + chr(10) + "- Uma cena por plano do original, com a mesma composição inicial do quadro original (ângulo, distância, posição e direção do olhar), só com o personagem trocado; o campo shot_pt copia a câmera do roteiro. Os ambientes seguem o roteiro aprovado (troca de blocos só se estiver aplicada nele)." if clone else ""}
+Uma entrada em "scenes" para cada cena (ou clipe encadeado que precise de imagem própria) do roteiro, na ordem. Ambientes recorrentes aparecem uma única vez em "environments". {CONSISTENCY_RULES}
+{sequel_environments(sequel)}{CLONE_RULES + chr(10) + "- Uma cena por plano do original, com a mesma composição inicial do quadro original (ângulo, distância, posição e direção do olhar), só com o personagem trocado; o campo shot_pt copia a câmera do roteiro. Os ambientes seguem o roteiro aprovado (troca de blocos só se estiver aplicada nele)." if clone else ""}
 {revision(previous, feedback)}
 {JSON_OUT}"""
 
@@ -348,8 +386,15 @@ Devolva este objeto:
 }}
 
 Regras: um ou mais clipes por cena, na ordem da edição; cada "duration_s" é UM destes valores: {', '.join(str(o) for o in (6, 10, 15) if o <= max_clip)} (o Grok só gera essas durações; escolha a menor que comporta as falas e a ação do clipe); {"a soma das durações deve bater com a duração do roteiro (que copia a do original); copie no prompt de cada clipe o movimento de câmera exato descrito na coluna Câmera do roteiro." if clone else "a soma das durações deve ficar ACIMA de 70 segundos e bater com o roteiro."} Cada clipe precisa dizer a duração e quais imagens anexar; escolha para cada clipe só as imagens que ele realmente usa. Não invente nomes de botões ou recursos do Grok.
+{"" if clone else HOOK_CLIP}
 {revision(previous, feedback)}
 {JSON_OUT}"""
+
+
+HOOK_CLIP = """GANCHO E FINAL NOS CLIPES (obrigatório):
+- Clipe 1: o prompt começa já no meio da ação de choque; a primeira ação visível acontece em até 1 s e o impacto máximo cai antes dos 3 s. Sem fade-in, sem plano de apresentação, sem câmera parada esperando. Se houver fala, a primeira frase é curta (até 6 palavras).
+- Último clipe: os últimos 3–5 s seguram o cliffhanger (revelação parcial, ameaça, olhar para algo que o público ainda não vê); a última fala deixa a pergunta no ar e a imagem final não resolve o conflito. Nada de despedida nem agradecimento.
+- Em todos os clipes: personagens e objetos exatamente como nas imagens anexadas (mesmo rosto, roupa, cores e acessórios); nenhum item aparece ou some sem a ação mostrar isso."""
 
 
 def doc09(previous: str | None, feedback: str | None) -> str:
@@ -362,7 +407,8 @@ Seções:
 ## 4. Áudio — voz sempre acima da música; estilo e andamento de música próximos ao original (com aviso para verificar licença); efeitos sonoros (onde e de que tipo); respiros.
 ## 5. Cor e acabamento — o que replicar do original.
 ## 6. Equivalentes no CapCut — marque "a confirmar na biblioteca do app".
-## 7. Exportação e checklist final — duração acima de 70 s, texto legível, áudio sem estourar, primeiros 2 s fortes.
+## 7. Exportação e checklist final — duração acima de 70 s, texto legível, áudio sem estourar, gancho forte nos primeiros 3 s.
+## 8. Gancho e final na edição — como montar os primeiros 3 s (corte no impacto, texto nos 1–2 s, som de impacto, nenhum respiro) e os últimos 3–5 s (segurar o suspense, texto de chamada para a parte 2, corte seco no auge, sem música de encerramento).
 {revision(previous, feedback)}
 {MD_OUT}"""
 
@@ -379,6 +425,7 @@ Seções:
 ## 3. Horário — sugestão em horário de Berlim com o equivalente em Brasília, baseada no horário do original e em hábitos gerais. É hipótese a testar; não invente estatísticas.
 ## 4. Capa — conceito, texto em alemão e um prompt de imagem 9:16 em inglês; sugira também um quadro do vídeo como alternativa.
 ## 5. Lembrete — conferir as regras atuais do TikTok sobre rotular conteúdo gerado por IA antes de publicar.
+## 6. Comentários — a pergunta para os comentários (DE, com tradução), uma legenda que termine nela e um comentário fixado (DE) convidando o público a pedir a parte 2.
 {revision(previous, feedback)}
 {MD_OUT}"""
 

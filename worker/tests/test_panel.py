@@ -220,7 +220,8 @@ def test_review_flow_sends_the_right_decisions(panel):
         await page.locator(".md table").wait_for()
         unsafe = await page.evaluate("[document.querySelectorAll('.md script, .md img').length, [...document.querySelectorAll('.md a')].filter(a => (a.getAttribute('href') || '').startsWith('javascript')).length, window.hacked === true]")
         assert unsafe == [0, 0, False]
-        assert await page.locator(".stagepanel .approval").count() == 0, "etapa já aprovada não oferece decisão"
+        assert await page.locator(".stagepanel").get_by_role("button", name="Aprovar").count() == 0, "etapa já aprovada não oferece aprovar de novo"
+        assert await page.get_by_role("button", name="Voltar para esta etapa").count() == 1, "mas oferece voltar a ela"
         await shot(page, "documento")
 
         # aprovar: a etapa seguinte para por limite e oferece nova tentativa
