@@ -525,3 +525,55 @@ def test_force_remakes_an_item_that_already_exists_even_when_the_stage_is_resume
     ctx.overrides = {"img-personagem-anna-corpo": "Anna com casaco azul."}
     run(ctx, "character_images")
     assert len(llm.images) == before + 1 and "casaco azul" in llm.images[-1]["prompt"]
+
+
+def _finished_parent(project, tmp_path):
+    """Produz o roteiro e os personagens da parte 1 e devolve (pasta dos projetos, id do pai)."""
+    ctx, _, _, _ = project
+    run(ctx, "analysis"); run(ctx, "script"); run(ctx, "character_bible")
+    return ctx.dir.parent, ctx.project_id
+
+
+def test_sequel_context_copies_the_story_and_characters_and_survives_deleting_the_parent(project, tmp_path):
+    projects_dir, parent_id = _finished_parent(project, tmp_path)
+    child = {"id": "p2", "parent_id": parent_id, "part": 2, "sequel_notes": "Anna encontra um dragão", "source_url": None}
+    sq = core.sequel_context(child, projects_dir)
+    assert sq["part"] == 2 and not sq["has_ref"] and "Anna und der Hund" in sq["story"] and sq["notes"] == "Anna encontra um dragão"
+    assert [c["name"] for c in sq["characters"]] and sq["doc02"]
+    shutil.rmtree(projects_dir / parent_id)
+    assert core.sequel_context(child, projects_dir)["story"] == sq["story"]   # a cópia local basta
+
+
+def test_sequel_without_the_parent_script_on_this_pc_is_blocked_with_a_clear_message(tmp_path):
+    with pytest.raises(Blocked) as err:
+        core.sequel_context({"id": "p2", "parent_id": "nao-existe", "part": 2}, tmp_path)
+    assert err.value.code == "MISSING_INPUT" and "parte anterior" in err.value.message
+
+
+def test_sequel_without_a_link_writes_a_continuation_brief_and_inherits_editing_style(project, tmp_path):
+    projects_dir, parent_id = _finished_parent(project, tmp_path)
+    ctx, llm, _, _ = project
+    ctx.project_id, ctx.dir = "p2", projects_dir / "p2"
+    ctx.sequel = core.sequel_context({"id": "p2", "parent_id": parent_id, "part": 2, "sequel_notes": "um dragão aparece", "source_url": None}, projects_dir)
+    ctx.source = ""
+    out = run(ctx, "analysis")
+    brief = llm.asks[-1]["prompt"]
+    assert "PARTE 2" in brief and "um dragão aparece" in brief and "Anna und der Hund" in brief and "Três direções" in brief
+    assert ctx.read_doc("01") and "Herdado da parte anterior" in ctx.read_doc("02") and "parte 2" in out["summary"]
+    run(ctx, "script")
+    script = llm.asks[-1]["prompt"]
+    assert "CONTINUAÇÃO · PARTE 2" in script and "Não há vídeo de referência" in script and "um dragão aparece" in script
+    run(ctx, "character_bible")
+    assert "Personagens da parte anterior" in llm.asks[-1]["prompt"] and "fixed_description" in llm.asks[-1]["prompt"]
+
+
+def test_sequel_with_a_link_analyzes_the_new_video_and_continues_the_story(project, tmp_path):
+    projects_dir, parent_id = _finished_parent(project, tmp_path)
+    ctx, llm, _, _ = project
+    ctx.project_id, ctx.dir = "p2", projects_dir / "p2"
+    ctx.sequel = core.sequel_context({"id": "p2", "parent_id": parent_id, "part": 2, "source_url": "https://tiktok.com/x"}, projects_dir)
+    run(ctx, "analysis")   # analisa o vídeo (aqui o MP4 de teste), sem o resumo sem referência
+    assert not any("Não há vídeo de referência" in a["prompt"] for a in llm.asks[-2:]) and llm.asks[-2]["files"]
+    run(ctx, "script")
+    script = llm.asks[-1]["prompt"]
+    assert "CONTINUAÇÃO · PARTE 2" in script and "PARTE 2 do original" in script and "Anna und der Hund" in script

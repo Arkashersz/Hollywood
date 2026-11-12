@@ -285,4 +285,55 @@ assert.equal(jb.input.item_key, 'img-cena-a');
 assert.equal(jb.input.comment, 'mais claro');
 step('adjust_item: etapa parada refaz o item e segue; etapa aprovada refaz só o item; só o dono');
 
+// --- voltar para uma etapa anterior ---------------------------------------------
+await as(A);
+const [rp] = await q(`select * from create_project_from_plan('Voltar', null, $1::jsonb)`, [JSON.stringify({ scene_images: [{ name: 'a', prompt: 'p' }] })]);
+await as(null, 'service_role');
+await db.query(`update jobs set status='succeeded' where project_id=$1`, [rp.id]);
+await db.query(`update project_stages set status='approved' where project_id=$1 and stage_order<=6`, [rp.id]);
+await db.query(`update project_stages set status='pending_review' where project_id=$1 and stage_order=7`, [rp.id]);
+const [r7] = await q(`select * from project_stages where project_id=$1 and stage_order=7`, [rp.id]);
+const [r4] = await q(`select * from project_stages where project_id=$1 and stage_order=4`, [rp.id]);
+await as(B);
+await fails(`select reopen_stage($1)`, [r4.id], /Stage not found/);
+await as(A);
+await fails(`select reopen_stage($1)`, [r7.id], /já aprovada/);
+const [ro] = await q(`select * from reopen_stage($1)`, [r4.id]);
+assert.equal(ro.status, 'pending_review');
+const aft = await q(`select stage_order,status,current_version from project_stages where project_id=$1 order by stage_order`, [rp.id]);
+assert.ok(aft.filter((x) => x.stage_order > 4 && x.stage_order <= 7).every((x) => x.status === 'locked' && x.current_version >= 2), 'seguintes bloqueadas com nova versão');
+assert.ok(aft.filter((x) => x.stage_order < 4).every((x) => x.status === 'approved'));
+const [rpr] = await q(`select status,current_stage from projects where id=$1`, [rp.id]);
+assert.equal(rpr.current_stage, 'character_images');
+// aprovar de novo libera e enfileira a etapa seguinte
+await q(`select * from decide_stage($1,'approve')`, [r4.id]);
+assert.equal((await q(`select status from project_stages where id=$1`, [(await q(`select id from project_stages where project_id=$1 and stage_order=5`, [rp.id]))[0].id]))[0].status, 'queued');
+step('reopen_stage: volta a uma etapa aprovada, bloqueia as seguintes e permite aprovar de novo; só o dono');
+
+// --- criar parte 2 -------------------------------------------------------------
+await as(A);
+const [par] = await q(`select * from create_project('Banana', 'https://tiktok.com/p1', 'clone')`);
+await fails(`select create_sequel($1)`, [par.id], /depois que o projeto estiver concluído/);
+await as(null, 'service_role');
+await db.query(`update projects set status='completed' where id=$1`, [par.id]);
+await as(B);
+await fails(`select create_sequel($1)`, [par.id], /pertence a outra conta|não encontrado/);
+await as(A);
+await fails(`select create_sequel($1, null, null, $2)`, [par.id, 'x'.repeat(4001)], /4000/);
+const [s2] = await q(`select * from create_sequel($1, null, null, 'um dragão aparece')`, [par.id]);
+assert.equal(s2.part, 2); assert.equal(s2.parent_id, par.id); assert.equal(s2.mode, 'inspired', 'sem link não há o que copiar');
+assert.equal(s2.source_url, null); assert.equal(s2.sequel_notes, 'um dragão aparece'); assert.match(s2.title, /Banana · Parte 2/);
+const st2 = await q(`select stage_key, title, status from project_stages where project_id=$1 order by stage_order`, [s2.id]);
+assert.equal(st2.length, 9); assert.equal(st2[0].title, 'Resumo da parte anterior'); assert.equal(st2[0].status, 'queued');
+assert.equal((await q(`select * from jobs where project_id=$1 and status='queued'`, [s2.id])).length, 1);
+await as(null, 'service_role');
+await db.query(`update projects set status='completed' where id=$1`, [s2.id]);
+await as(A);
+const [s3] = await q(`select * from create_sequel($1, 'https://tiktok.com/parte-3', 'Meu título')`, [s2.id]);
+assert.equal(s3.part, 3); assert.equal(s3.title, 'Meu título'); assert.equal(s3.source_url, 'https://tiktok.com/parte-3');
+assert.equal((await q(`select title from project_stages where project_id=$1 and stage_key='analysis'`, [s3.id]))[0].title, 'Análise da parte 2 da referência');
+const [s4] = await q(`select * from create_sequel($1, 'https://tiktok.com/x')`, [par.id]);
+assert.equal(s4.mode, 'clone', 'com link a continuação herda o modo do projeto original');
+step('create_sequel: só projeto concluído e dono; com link analisa a referência, sem link resume a parte anterior');
+
 console.log('Todas as verificações de SQL passaram.');

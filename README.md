@@ -80,6 +80,15 @@ Ao enviar o link você escolhe:
 
 Exige a migração `0007_clone_mode.sql` (SQL Editor do Supabase).
 
+## Criar parte 2
+
+Quando um projeto fica **Concluído**, aparece o botão **Criar parte 2** (depois, parte 3 e assim por diante). A continuação é um projeto novo, ligado ao anterior, com as mesmas nove etapas e a mesma aprovação a cada uma. O worker precisa estar no PC onde o projeto anterior foi produzido: é de lá que ele lê o roteiro e os personagens (a cópia fica guardada na pasta da continuação, então apagar o projeto anterior depois não atrapalha).
+
+- **Sem link**: o Claude resume a história até aqui, lista os fios soltos e propõe três direções para a continuação (a primeira etapa mostra isso; escolha uma pedindo revisão, ou aprove para seguir a recomendada). A edição herda o estilo da parte anterior.
+- **Com o link da parte 2 do vídeo original**: o Claude analisa esse vídeo e escreve a continuação da *sua* história seguindo o que acontece nele (estrutura, acontecimentos, ritmo e gancho), sem copiar falas. Se o projeto anterior era "Cópia fiel", a continuação também é fiel ao novo vídeo.
+- Um campo opcional de **ideias** (o que você quer que aconteça) tem prioridade sobre as sugestões do Claude.
+- Personagens que já existiam mantêm nome, descrição e voz idênticos; as imagens deles são geradas de novo a partir da mesma descrição.
+
 ## Ajustar imagens e vídeos a qualquer momento
 
 Nas etapas de imagens e vídeos, cada item tem o botão **Ajustar**, com a etapa parada, em revisão ou já aprovada. Dá para editar o prompt do item e gerar só ele de novo (a etapa volta para a sua revisão). Quando uma etapa para porque um item não pôde ser criado, o painel mostra esse item com o prompt editável e **Salvar prompt e tentar de novo** continua dali, mantendo o que já saiu. Exige a migração `0009_adjust_item.sql`.

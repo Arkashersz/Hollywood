@@ -21,7 +21,7 @@ from .claude_bridge.batches import create_batch
 from .db import Db, SupabaseSink, now
 from .errors import Blocked
 from .pipeline import stages
-from .pipeline.core import Ctx
+from .pipeline.core import Ctx, sequel_context
 
 HOST = socket.gethostname()
 
@@ -41,7 +41,13 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
     project_dir = config.PROJECTS_DIR / project["id"]
     project_dir.mkdir(parents=True, exist_ok=True)
     sink = SupabaseSink(db, project, stage, project_dir)
-    ctx = Ctx(project_id=project["id"], source=project.get("source_url") or project.get("source_video_path") or "", dir=project_dir,
+    try:
+        sequel = sequel_context(project, config.PROJECTS_DIR)
+    except Blocked as exc:   # sem o roteiro da parte anterior neste PC não há como continuar
+        db.update_stage(stage["id"], status="failed", remove=("progress",), patch={"error": exc.as_dict()})
+        db.finish_job(job["id"], "blocked", error_code=exc.code, error_message=exc.message)
+        return
+    ctx = Ctx(sequel=sequel, project_id=project["id"], source=project.get("source_url") or project.get("source_video_path") or "", dir=project_dir,
               sink=sink, brain=brain_for(project_dir), images=images, video=video, stage_key=stage["stage_key"], version=stage["current_version"],
               feedback=inp.get("feedback"), max_clip=config.GROK_MAX_CLIP_SECONDS, whisper_model=config.WHISPER_MODEL,
               language=config.REFERENCE_LANGUAGE, plan=project.get("import_plan"), clone=project.get("mode") == "clone", image_concurrency=config.IMAGE_CONCURRENCY, video_concurrency=config.VIDEO_CONCURRENCY,

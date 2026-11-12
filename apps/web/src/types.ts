@@ -2,7 +2,7 @@ import { Clapperboard, FileText, Film, Image, LayoutGrid, Link2, Mic, UserRound,
 
 export type StageStatus = 'locked' | 'queued' | 'in_progress' | 'pending_review' | 'approved' | 'changes_requested' | 'failed';
 
-export type Project = { id: string; title: string; source_url: string | null; mode?: 'inspired' | 'clone'; status: string; current_stage: string; updated_at: string; created_at: string };
+export type Project = { id: string; title: string; source_url: string | null; mode?: 'inspired' | 'clone'; parent_id?: string | null; part?: number; sequel_notes?: string | null; status: string; current_stage: string; updated_at: string; created_at: string };
 
 export type StageItem = { key: string; name: string; prompt: string; kind?: string };
 export type StageError = { code: string; message: string; action?: string; blocked?: boolean; item?: StageItem };

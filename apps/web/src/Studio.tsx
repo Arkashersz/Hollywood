@@ -107,6 +107,16 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
     }
     seenAttention.current = attention.length;
   }, [attention.length]);
+  // Cria a parte seguinte de um projeto concluído e abre o novo projeto. Devolve a mensagem de erro, ou null.
+  const createSequel = useCallback(async (parentId: string, source: string, title: string, notes: string): Promise<string | null> => {
+    const { data, error } = await db.rpc('create_sequel', { p_parent: parentId, p_source: source || null, p_title: title || null, p_notes: notes || null });
+    if (error) { setNotice(`Não foi possível criar a continuação: ${error.message}`); return error.message; }
+    setNotice(source ? 'Continuação criada. O Claude analisa a parte 2 do original assim que o worker estiver online.' : 'Continuação criada. O Claude resume a história e propõe direções assim que o worker estiver online.');
+    await refresh();
+    const created = data as { id?: string } | null;
+    if (created?.id) setSelectedId(created.id);
+    return null;
+  }, [db, refresh]);
   // Exclui o projeto e, depois, os arquivos dele no Storage. Devolve a mensagem de erro, ou null se deu certo.
   const deleteProject = useCallback(async (id: string, paths: string[]): Promise<string | null> => {
     const { error } = await db.rpc('delete_project', { p_project_id: id });
@@ -161,7 +171,7 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
           {notice && <div className="notice" role="status"><Sparkles size={17} /><span>{notice}</span><button className="linkbtn" onClick={() => setNotice('')}>fechar</button></div>}
           {view === 'projects' && (
             <ProjectsView projects={projects} project={project} stages={stages} allStages={allStages} attention={attention} artifacts={artifacts} urls={urls} live={live} workerOnline={workerOnline}
-              onSelect={setSelectedId} call={call} download={download} deleteProject={deleteProject} />
+              onSelect={setSelectedId} call={call} download={download} deleteProject={deleteProject} createSequel={createSequel} />
           )}
           {view === 'activity' && <ActivityView events={events} projects={projects} />}
           {view === 'integrations' && <IntegrationsView heartbeat={heartbeat} workerOnline={workerOnline} />}
@@ -189,8 +199,9 @@ function projectState(project: Project, stages: Stage[]): { label: string; tone:
 function ProjectsView(props: {
   projects: Project[]; project: Project | null; stages: Stage[]; allStages: Stage[]; attention: Attention; artifacts: Artifact[]; urls: Record<string, string>; live: boolean; workerOnline: boolean;
   onSelect: (id: string) => void; call: Call; download: Download; deleteProject: (id: string, paths: string[]) => Promise<string | null>;
+  createSequel: (parentId: string, source: string, title: string, notes: string) => Promise<string | null>;
 }) {
-  const { projects, project, stages, allStages, attention, artifacts, urls, live, workerOnline, onSelect, call, download, deleteProject } = props;
+  const { projects, project, stages, allStages, attention, artifacts, urls, live, workerOnline, onSelect, call, download, deleteProject, createSequel } = props;
   const [notifyAsked, setNotifyAsked] = useState(() => !('Notification' in window) || Notification.permission !== 'default');
   const [source, setSource] = useState('');
   const [title, setTitle] = useState('');
@@ -202,6 +213,11 @@ function ProjectsView(props: {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState('');
+  const [sequelOpen, setSequelOpen] = useState(false);
+  const [sequelSource, setSequelSource] = useState('');
+  const [sequelNotes, setSequelNotes] = useState('');
+  const [sequelBusy, setSequelBusy] = useState(false);
+  const [sequelError, setSequelError] = useState('');
   const approved = stages.filter((s) => s.status === 'approved').length;
   const current = stages.find((s) => s.status !== 'approved') ?? stages[stages.length - 1] ?? null;
   const stage = stages.find((s) => s.id === stageId) ?? current;
@@ -209,7 +225,15 @@ function ProjectsView(props: {
   const heroItem = artifacts.find((a) => a.artifact_type === 'image' && a.storage_path);
   const heroUrl = heroItem?.storage_path ? urls[`${heroItem.storage_path}|${heroItem.updated_at}`] : undefined;
 
-  useEffect(() => { setStageId(null); setConfirmDelete(false); setDeleteError(''); }, [project?.id]);
+  useEffect(() => { setStageId(null); setConfirmDelete(false); setDeleteError(''); setSequelOpen(false); setSequelSource(''); setSequelNotes(''); setSequelError(''); }, [project?.id]);
+
+  async function makeSequel() {
+    if (!project) return;
+    setSequelBusy(true); setSequelError('');
+    const error = await createSequel(project.id, sequelSource.trim(), '', sequelNotes.trim());
+    setSequelBusy(false);
+    if (error) setSequelError(error);
+  }
 
   async function removeProject() {
     if (!project) return;
@@ -311,7 +335,7 @@ function ProjectsView(props: {
                 <button key={p.id} onClick={() => onSelect(p.id)} className={`project ${project?.id === p.id ? 'selected' : ''}`}>
                   <div className="projectthumb"><Film size={21} /></div>
                   <div className="projectmeta">
-                    <b>{p.title}</b>
+                    <b>{p.title}</b>{(p.part ?? 1) > 1 && <em className="partbadge">Parte {p.part}</em>}
                     <div className="seg mini" aria-hidden="true">{mine.map((x) => <i key={x.id} className={x.status} />)}</div>
                     <span className={`state ${state.tone}`}>{state.label}</span>
                     <small>{nowStage ? STAGE_TITLE(nowStage.stage_key) : 'Todas as etapas aprovadas'}{agent ? ` · ${AGENT_LABEL[agent]}` : ''} · {timeAgo(p.updated_at)}</small>
@@ -325,7 +349,7 @@ function ProjectsView(props: {
             <div className="detail">
               <div className="detailtop">
                 {heroUrl && <img className="hero" src={heroUrl} alt="" />}
-                <div className="herotext"><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{project.mode === 'clone' ? 'Cópia fiel · ' : ''}{project.source_url}</small></div>
+                <div className="herotext"><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{(project.part ?? 1) > 1 ? `Parte ${project.part} · ` : ''}{project.mode === 'clone' ? 'Cópia fiel · ' : ''}{project.source_url ?? (project.parent_id ? 'continuação sem vídeo de referência' : '')}</small></div>
                 <span className={`statuspill st-${projectState(project, stages).tone}`}>{projectState(project, stages).label}</span>
                 {!confirmDelete
                   ? <button className="ghost danger" onClick={() => setConfirmDelete(true)} title="Excluir este projeto"><Trash2 size={14} /> Excluir</button>
@@ -334,6 +358,26 @@ function ProjectsView(props: {
                       <button className="ghost" onClick={() => setConfirmDelete(false)} disabled={deleting}>Cancelar</button></span>}
                 {deleteError && <div className="callout warn" style={{ flexBasis: '100%' }}><AlertTriangle size={15} /><span>Não foi possível excluir: {deleteError}</span></div>}
               </div>
+              {project.status === 'completed' && (
+                <div className="sequel">
+                  {!sequelOpen
+                    ? <button className="primary" onClick={() => setSequelOpen(true)}><Plus size={16} /> Criar parte {(project.part ?? 1) + 1}</button>
+                    : (
+                      <div className="sequelform">
+                        <b>Parte {(project.part ?? 1) + 1} da história</b>
+                        <small>O Claude lê o roteiro e os personagens desta produção e escreve a continuação. Cada etapa continua parando para a sua aprovação.</small>
+                        <div className="createinput"><Link2 size={16} /><input value={sequelSource} onChange={(e) => setSequelSource(e.target.value)} aria-label="Link da parte seguinte do original" placeholder="Link da parte seguinte do vídeo original (opcional)" /></div>
+                        <small>{sequelSource.trim() ? 'Com link: o Claude analisa esse vídeo e continua a sua história seguindo o que acontece nele' + (project.mode === 'clone' ? ', em cópia fiel.' : '.') : 'Sem link: o Claude cria a continuação a partir da sua história e propõe três direções para você escolher.'}</small>
+                        <textarea rows={3} value={sequelNotes} onChange={(e) => setSequelNotes(e.target.value)} aria-label="Ideias para a continuação" placeholder="Ideias para a continuação (opcional): o que você quer que aconteça, novos personagens, o tom…" />
+                        <div className="sequelactions">
+                          <button className="primary" onClick={makeSequel} disabled={sequelBusy}>{sequelBusy ? 'Criando…' : `Criar parte ${(project.part ?? 1) + 1}`} <ChevronRight size={16} /></button>
+                          <button className="ghost" onClick={() => setSequelOpen(false)} disabled={sequelBusy}>Cancelar</button>
+                        </div>
+                        {sequelError && <div className="callout warn"><AlertTriangle size={15} /><span>{sequelError}</span></div>}
+                      </div>
+                    )}
+                </div>
+              )}
               <div className="stats">
                 <div><small>Etapas aprovadas</small><b>{approved}<span>/{stages.length}</span></b></div>
                 <div><small>Imagens e vídeos</small><b>{readyMedia}<span> prontos</span></b></div>
@@ -388,6 +432,7 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
   const [open, setOpen] = useState<number | null>(null);
   const [comment, setComment] = useState('');
   const [asking, setAsking] = useState(false);
+  const [reopening, setReopening] = useState(false);
   const [busy, setBusy] = useState(false);
   const payload = stage.payload ?? {};
   const docs = artifacts.filter((a) => a.artifact_type === 'document').sort((a, b) => (a.item_key ?? '').localeCompare(b.item_key ?? ''));
@@ -404,7 +449,7 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
     setBusy(true);
     const done = await call(fn, args, ok);
     setBusy(false);
-    if (done) { setComment(''); setAsking(false); }
+    if (done) { setComment(''); setAsking(false); setReopening(false); }
   }
 
   return (
@@ -468,6 +513,22 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
       {stage.status === 'failed' && (
         <div className="approval"><div><b>Etapa parada</b><small>Resolva o que foi indicado acima; os itens já prontos são mantidos.</small></div>
           <button disabled={busy} onClick={() => run('retry_stage', { p_stage_id: stage.id }, 'Nova tentativa enfileirada.')}><RotateCcw size={16} /> Tentar novamente</button></div>
+      )}
+      {stage.status === 'approved' && (
+        <div className="approval">
+          <div>
+            <b>Voltar para esta etapa</b>
+            <small>{reopening
+              ? 'A etapa volta para revisão com o conteúdo atual: ajuste o que precisar e aprove de novo. As etapas seguintes que já andaram são bloqueadas e refeitas depois da sua aprovação (seus prompts editados são mantidos).'
+              : 'Precisa corrigir algo feito aqui? Volte a esta etapa sem perder o trabalho.'}</small>
+          </div>
+          <div className="approvalbtns">
+            {reopening
+              ? <><button className="ghost" onClick={() => setReopening(false)}>Cancelar</button>
+                <button disabled={busy} onClick={() => run('reopen_stage', { p_stage_id: stage.id, p_reason: null }, 'Voltou para esta etapa; ajuste e aprove de novo.')}><RotateCcw size={16} /> Confirmar e voltar</button></>
+              : <button className="ghost" disabled={busy} onClick={() => setReopening(true)}><RotateCcw size={16} /> Voltar para esta etapa</button>}
+          </div>
+        </div>
       )}
       {reviewing && (
         <div className="approval">

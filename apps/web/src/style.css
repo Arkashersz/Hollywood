@@ -354,3 +354,12 @@ footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wr
 .fixitem textarea, .regen textarea { width: 100%; border: 1px solid var(--line-strong); background: var(--bg); color: var(--text); border-radius: 8px; padding: 10px; font: 12.5px/1.5 ui-monospace, Menlo, Consolas, monospace; resize: vertical; }
 .fixitem button { justify-self: start; min-height: 36px; padding: 0 14px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font-weight: 600; font-size: 13px; display: inline-flex; align-items: center; gap: 7px; }
 .fixitem button:disabled { opacity: .45; }
+
+.sequel { margin: 4px 0 12px; }
+.sequel > button.primary { min-height: 40px; padding: 0 16px; border: 0; border-radius: 10px; background: var(--accent); color: var(--accent-ink); font-weight: 600; display: inline-flex; align-items: center; gap: 8px; }
+.sequelform { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface-2); }
+.sequelform small { color: var(--muted); }
+.sequelform textarea { width: 100%; border: 1px solid var(--line-strong); background: var(--bg); color: var(--text); border-radius: 8px; padding: 10px; font: inherit; resize: vertical; }
+.sequelactions { display: flex; gap: 8px; flex-wrap: wrap; }
+.sequelactions .primary { min-height: 38px; padding: 0 16px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.partbadge { font-style: normal; font-size: 11px; margin-left: 8px; padding: 2px 7px; border-radius: 99px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--line-strong); }

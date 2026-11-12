@@ -323,3 +323,25 @@ def test_gallery_lightbox_navigates_and_shows_overview(panel):
         assert await dialog.count() == 0
         return await page.title()
     assert drive(panel, scenario).startswith("(1)")
+
+
+def test_completed_project_offers_part_two_with_or_without_a_link(panel):
+    async def scenario(page, fake):
+        # Projeto em andamento: nada de "Criar parte 2"
+        await page.get_by_text("Anna und der Hund").first.click()
+        assert await page.get_by_role("button", name="Criar parte 2").count() == 0
+        # Concluído: o botão aparece e abre o formulário
+        fake.project["status"] = "completed"
+        await page.reload()
+        await page.get_by_text("Anna und der Hund").first.click()
+        await page.get_by_role("button", name="Criar parte 2").click()
+        await page.get_by_label("Ideias para a continuação").fill("um dragão aparece")
+        assert await page.get_by_text("Sem link:").count() == 1
+        await page.get_by_label("Link da parte seguinte do original").fill("https://www.tiktok.com/@x/video/2")
+        assert await page.get_by_text("Com link:").count() == 1
+        await page.get_by_role("button", name="Criar parte 2").last.click()
+        await page.get_by_text("Continuação criada").wait_for()
+        return fake.rpc_calls
+    calls = drive(panel, scenario)
+    assert ("create_sequel", {"p_parent": "11111111-aaaa-bbbb-cccc-000000000001", "p_source": "https://www.tiktok.com/@x/video/2",
+                              "p_title": None, "p_notes": "um dragão aparece"}) in calls

@@ -73,6 +73,7 @@ class Ctx:
     pilot_approved: bool = False    # o clipe-piloto já foi aprovado: a etapa de vídeos gera o restante
     overrides: dict = field(default_factory=dict)   # prompts editados pelo usuário: chave do item -> texto
     force: set = field(default_factory=set)          # itens a refazer mesmo já prontos (ajuste pedido numa etapa parada)
+    sequel: dict | None = None      # continuação (parte 2+): {part, notes, story, characters, has_ref, doc02}
     clone: bool = False             # modo cópia fiel: roteiro, cortes e câmera idênticos ao original
     plan: dict | None = None        # prompts trazidos prontos pelo usuário (projeto iniciado numa etapa avançada)
     _generated: dict = field(default_factory=dict)
@@ -135,6 +136,38 @@ class Ctx:
         path = self._generated_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(self._generated, indent=1), encoding="utf-8")
+
+
+def sequel_context(project: dict, projects_dir: Path) -> dict | None:
+    """Contexto de uma continuação. A história até aqui é copiada para a pasta do projeto na primeira vez,
+    então apagar o projeto anterior depois não quebra a parte 2."""
+    parent_id = project.get("parent_id")
+    if not parent_id:
+        return None
+    mine = projects_dir / str(project["id"])
+    story_file, chars_file, doc02_file = mine / "historia-anterior.md", mine / "dados" / "personagens-anteriores.json", mine / "dados" / "edicao-anterior.md"
+    part = int(project.get("part") or 2)
+    if not story_file.is_file():
+        parent = projects_dir / str(parent_id)
+        script = parent / DOCS["03"][0]
+        if not script.is_file():
+            raise Blocked("MISSING_INPUT", f"O roteiro da parte anterior não está neste PC ({script}). A parte 2 precisa dele; "
+                                           "gere a continuação no computador onde o projeto anterior foi produzido.")
+        earlier = (parent / "historia-anterior.md").read_text(encoding="utf-8") if (parent / "historia-anterior.md").is_file() else ""
+        story = (earlier.strip() + f"\n\n# PARTE {part - 1}\n\n" + script.read_text(encoding="utf-8")[:9000]).strip()
+        mine.mkdir(parents=True, exist_ok=True)
+        chars_file.parent.mkdir(parents=True, exist_ok=True)
+        story_file.write_text(story, encoding="utf-8")
+        bible = parent / "dados" / "bible.json"
+        if bible.is_file():
+            chars_file.write_text(json.dumps(json.loads(bible.read_text(encoding="utf-8")).get("characters") or [], ensure_ascii=False, indent=1), encoding="utf-8")
+        edit = parent / DOCS["02"][0]
+        if edit.is_file():
+            doc02_file.write_text(edit.read_text(encoding="utf-8"), encoding="utf-8")
+    return {"part": part, "notes": project.get("sequel_notes"), "story": story_file.read_text(encoding="utf-8"),
+            "characters": json.loads(chars_file.read_text(encoding="utf-8")) if chars_file.is_file() else [],
+            "has_ref": bool(project.get("source_url") or project.get("source_video_path")),
+            "doc02": doc02_file.read_text(encoding="utf-8") if doc02_file.is_file() else None}
 
 
 def strip_leading_title(markdown: str) -> str:

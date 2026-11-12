@@ -121,7 +121,19 @@ def _imported_items(ctx: Ctx, stage_key: str) -> list[Item]:
 # ---------------------------------------------------------------------------
 # 1 · Análise (Python extrai as evidências; Claude interpreta)
 # ---------------------------------------------------------------------------
+async def _sequel_analysis(ctx: Ctx) -> dict:
+    """Parte 2 sem vídeo de referência: o Claude resume a história até aqui e propõe direções para a continuação."""
+    ctx.log(f"Pedindo o resumo e as direções da parte {ctx.sequel['part']} ao Claude…")
+    ctx.write_doc("01", await ctx.brain.ask(prompts.sequel_brief(ctx.sequel, ctx.previous("01"), ctx.feedback), []))
+    ctx.write_doc("02", (ctx.sequel.get("doc02") or "## Edição\n\nA parte anterior não tem documento de edição neste PC; mantenha o ritmo e o estilo do roteiro da parte anterior.")
+                  + "\n\n> Herdado da parte anterior: esta continuação não tem vídeo de referência próprio.")
+    return {"summary": f"Resumo da história até aqui e direções para a parte {ctx.sequel['part']}. Leia a seção 5 (direções); "
+                       "para escolher uma, peça revisão dizendo qual, ou aprove para o Claude seguir a recomendada.", "warnings": []}
+
+
 async def analysis(ctx: Ctx) -> dict:
+    if ctx.sequel and not ctx.sequel.get("has_ref"):
+        return await _sequel_analysis(ctx)
     ref = ctx.dir / "referencia"
     evidence = await asyncio.to_thread(media.analyze, ctx.source, ref, whisper_model=ctx.whisper_model,
                                        language=ctx.language, log=ctx.log)
@@ -167,7 +179,7 @@ async def analysis(ctx: Ctx) -> dict:
 # 2 · Roteiro
 # ---------------------------------------------------------------------------
 async def script(ctx: Ctx) -> dict:
-    prompt = prompts.doc03(ctx.read_doc("01"), ctx.read_doc("02"), ctx.max_clip, ctx.previous("03"), ctx.feedback, ctx.clone)
+    prompt = prompts.doc03(ctx.read_doc("01"), ctx.read_doc("02"), ctx.max_clip, ctx.previous("03"), ctx.feedback, ctx.clone, ctx.sequel)
     ctx.log("Pedindo o roteiro " + ("fiel ao original, em alemão, " if ctx.clone else "em alemão ") + "ao Claude…")
     ctx.write_doc("03", await ctx.brain.ask(prompt, []))
     if ctx.clone:
@@ -185,7 +197,7 @@ def _previous_data(ctx: Ctx, name: str) -> str | None:
 
 
 async def character_bible(ctx: Ctx) -> dict:
-    prompt = prompts.bible(ctx.read_doc("01"), ctx.read_doc("03"), _previous_data(ctx, "bible"), ctx.feedback, ctx.clone)
+    prompt = prompts.bible(ctx.read_doc("01"), ctx.read_doc("03"), _previous_data(ctx, "bible"), ctx.feedback, ctx.clone, ctx.sequel)
     ctx.log("Pedindo personagens, estilo e vozes ao Claude…")
     bible = await ask_json(ctx.brain, prompt, validate_bible)
     ctx.save_data("bible", bible)

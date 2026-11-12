@@ -150,12 +150,60 @@ Seções:
 {MD_OUT}"""
 
 
-def doc03(doc01_md: str, doc02_md: str, max_clip: int, previous: str | None, feedback: str | None, clone: bool = False) -> str:
+def sequel_block(sequel: dict | None) -> str:
+    """Contexto de continuação (parte 2, 3…): a história até aqui e o que o usuário pediu. Vazio quando o projeto não é continuação."""
+    if not sequel:
+        return ""
+    ref = ("Há um vídeo de referência da PARTE %d do original (Documentos 01 e 02): ele mostra o que acontece nessa parte e como ela é filmada e editada. "
+           "Continue a história do usuário seguindo a ESTRUTURA, os acontecimentos-chave, o ritmo e o gancho desse vídeo, mas aplicados aos personagens e à situação da história do usuário. "
+           "Não copie falas." % sequel["part"]) if sequel.get("has_ref") else (
+           "Não há vídeo de referência para esta parte: invente a continuação com liberdade criativa, mantendo o tom, o ritmo e o estilo de edição da parte anterior (Documento 02).")
+    notes = f"\nIdeias do usuário para a continuação (prioridade alta): {sequel['notes']}" if sequel.get("notes") else ""
+    return f"""
+
+CONTINUAÇÃO · PARTE {sequel['part']}: este vídeo continua uma história já produzida. O roteiro anterior está abaixo; o novo roteiro começa DEPOIS dele, sem repeti-lo.
+- Mantenha os mesmos personagens (nomes, personalidade e relações), o mesmo mundo e as regras já estabelecidas.
+- Comece retomando o fim da parte anterior (uma frase de recapitulação visual ou falada, no máximo) e termine com novo gancho ou conclusão digna de parte {sequel['part']}.
+- {ref}{notes}
+
+{data('historia-ate-agora', sequel['story'])}
+"""
+
+
+def sequel_characters(sequel: dict | None) -> str:
+    if not sequel or not sequel.get("characters"):
+        return ""
+    return f"""
+Personagens da parte anterior (CONTINUAÇÃO): quem já existia mantém EXATAMENTE o mesmo nome, "fixed_description", "never_change_pt", expressões e voz (copie, não reescreva). Personagens novos só se o roteiro precisar.
+{data('personagens-anteriores', json.dumps(sequel['characters'], ensure_ascii=False, indent=1))}
+"""
+
+
+def sequel_brief(sequel: dict, previous: str | None, feedback: str | None) -> str:
+    return f"""{BASE}
+
+TAREFA: você é o ANALISTA. O usuário vai produzir a PARTE {sequel['part']} de uma história que ele já produziu. Não há vídeo de referência para esta parte. Escreva o Documento 01 · Ficha da continuação, um briefing para o roteirista.
+
+{data('historia-ate-agora', sequel['story'])}
+{('Ideias do usuário para a continuação: ' + sequel['notes']) if sequel.get('notes') else ''}
+
+Seções:
+## 1. Resumo da história até aqui — acontecimentos em ordem, em português.
+## 2. Personagens e estado atual de cada um — onde estão, o que querem, o que mudou.
+## 3. Fios soltos — conflitos, promessas e mistérios que a parte {sequel['part']} pode resolver ou aprofundar.
+## 4. Tom, ritmo e gancho da parte anterior — o que funcionou e deve ser mantido.
+## 5. Três direções possíveis para a continuação — título, premissa em 2 frases e o gancho final de cada uma. Marque qual você recomenda e por quê (as ideias do usuário, se houver, têm prioridade).
+## 6. Dúvidas ao usuário.
+{revision(previous, feedback)}
+{MD_OUT}"""
+
+
+def doc03(doc01_md: str, doc02_md: str, max_clip: int, previous: str | None, feedback: str | None, clone: bool = False, sequel: dict | None = None) -> str:
     if clone:
         return CLONE_BASE + "\n\n" + CLONE_SCRIPT.format(
             doc01=data('documento-01-ficha-da-referencia', doc01_md), doc02=data('documento-02-edicao-da-referencia', doc02_md),
             rules=CLONE_RULES + f"\n- O Grok gera clipes de exatamente 6, 10 ou 15 s (máximo {max_clip} s por clipe); um plano mais longo vira clipes encadeados (\"7a\", \"7b\").",
-            revision=revision(previous, feedback), md_out=MD_OUT)
+            revision=sequel_block(sequel) + revision(previous, feedback), md_out=MD_OUT)
     return f"""{BASE}
 
 TAREFA: você é o ROTEIRISTA. Escreva o melhor roteiro INSPIRADO na referência, em alemão.
@@ -182,11 +230,11 @@ Escreva o Documento 03 · Roteiro com estas seções:
 ## 4. Conta da duração.
 ## 5. Texto corrido — em alemão e a tradução em português.
 ## 6. Dúvidas ao usuário.
-{revision(previous, feedback)}
+{sequel_block(sequel)}{revision(previous, feedback)}
 {MD_OUT}"""
 
 
-def bible(doc01_md: str, doc03_md: str, previous: str | None, feedback: str | None, clone: bool = False) -> str:
+def bible(doc01_md: str, doc03_md: str, previous: str | None, feedback: str | None, clone: bool = False, sequel: dict | None = None) -> str:
     return f"""{CLONE_BASE if clone else BASE}
 
 TAREFA: você é o CINEGRAFISTA. Defina a identidade visual e sonora dos personagens do roteiro aprovado.
@@ -219,7 +267,7 @@ Devolva este objeto:
 
 Inclua todos os personagens que aparecem no roteiro, inclusive um narrador sem corpo (nesse caso deixe "fixed_description" como "voice only" e as listas vazias). Não descreva voz nem aparência como imitação de pessoa real.
 {"No modo cópia fiel: um personagem novo para cada personagem do original (mesma quantidade, mesmos papéis e relações, mesma proporção e energia), trocando só o elemento central; o style_block deve reproduzir o estilo visual do original (tipo de render, paleta, luz, lente) o mais fiel possível." if clone else ""}
-{revision(previous, feedback)}
+{sequel_characters(sequel)}{revision(previous, feedback)}
 {JSON_OUT}"""
 
 
