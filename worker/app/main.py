@@ -26,7 +26,7 @@ from .pipeline.core import Ctx
 HOST = socket.gethostname()
 
 
-async def process(db: Db, job: dict, brain_for, images, video) -> None:
+async def process(db: Db, job: dict, brain_for, images, video, pools: dict | None = None) -> None:
     """Executa uma tarefa e grava o desfecho. Nunca aprova nada: a etapa termina em revisão."""
     kind, inp = job.get("job_type"), job.get("input") or {}
     if kind == "prepare_claude_batch":  # rota manual opcional: pacote para o Claude Code operar o navegador
@@ -44,7 +44,8 @@ async def process(db: Db, job: dict, brain_for, images, video) -> None:
     ctx = Ctx(project_id=project["id"], source=project.get("source_url") or project.get("source_video_path") or "", dir=project_dir,
               sink=sink, brain=brain_for(project_dir), images=images, video=video, stage_key=stage["stage_key"], version=stage["current_version"],
               feedback=inp.get("feedback"), max_clip=config.GROK_MAX_CLIP_SECONDS, whisper_model=config.WHISPER_MODEL,
-              language=config.REFERENCE_LANGUAGE, plan=project.get("import_plan"), pause=lambda: asyncio.sleep(config.PAUSE_BETWEEN_ITEMS))
+              language=config.REFERENCE_LANGUAGE, plan=project.get("import_plan"), clone=project.get("mode") == "clone", image_concurrency=config.IMAGE_CONCURRENCY, video_concurrency=config.VIDEO_CONCURRENCY,
+              image_slots=(pools or {}).get("image"), video_slots=(pools or {}).get("video"), pilot_approved=bool((stage.get("payload") or {}).get("pilot_approved")), pause=lambda: asyncio.sleep(config.PAUSE_BETWEEN_ITEMS))
     regen = kind == "regen_item"
     db.update_stage(stage["id"], status="in_progress", remove=("error", "progress"))
     try:
@@ -53,7 +54,7 @@ async def process(db: Db, job: dict, brain_for, images, video) -> None:
             db.update_stage(stage["id"], status="pending_review", remove=("progress",))
         else:
             result = await stages.run_stage(ctx)
-            db.update_stage(stage["id"], status="pending_review", submitted_at=now(), remove=("progress", "next_generation", "warnings"),
+            db.update_stage(stage["id"], status="pending_review", submitted_at=now(), remove=("progress", "next_generation", "warnings", "pilot", "pilot_remaining"),
                             patch={"local_dir": str(project_dir), **result})
             ctx.log(f"Etapa pronta para revisão. {result.get('summary', '')}")
         db.finish_job(job["id"], "succeeded", output={"stage_key": stage["stage_key"]})
@@ -90,39 +91,65 @@ async def main() -> None:
     # Cérebro: Claude (padrão), uma conversa por tarefa na pasta do projeto. BRAIN=chatgpt usa o ChatGPT do navegador.
     brain_for = (lambda project_dir: images) if config.BRAIN == "chatgpt" else (lambda project_dir: ClaudeBrain(project_dir))
     print(f"Cérebro: {'ChatGPT (navegador)' if config.BRAIN == 'chatgpt' else 'Claude (Claude Code local)'} · imagens: ChatGPT · vídeos: Grok", flush=True)
-    state = {"job": None, "version": "0.3.0", "brain": config.BRAIN}
+    parallel = 1 if config.BRAIN == "chatgpt" else config.MAX_PARALLEL_JOBS   # com o ChatGPT como cérebro, a aba de texto é a mesma das imagens
+    pools = {}
+    for name, size in (("image", config.IMAGE_CONCURRENCY), ("video", config.VIDEO_CONCURRENCY)):
+        pools[name] = asyncio.Queue()
+        for n in range(size):
+            pools[name].put_nowait(n)
+    state = {"job": None, "jobs": [], "version": "0.4.0", "brain": config.BRAIN, "parallel": parallel}
+    print(f"Projetos ao mesmo tempo: {parallel} · abas de imagem: {config.IMAGE_CONCURRENCY} · abas de vídeo: {config.VIDEO_CONCURRENCY}", flush=True)
     print(f"TikTok Studio Worker {config.WORKER_ID} iniciado em {HOST}. Projetos em {config.PROJECTS_DIR}", flush=True)
     stale = db.requeue_stale()
     if stale:
         print(f"{stale} tarefa(s) interrompida(s) voltaram para a fila.", flush=True)
     beat = asyncio.create_task(heartbeat(db, state))
     idle_since = time.monotonic()
+    active: dict[str, tuple[asyncio.Task, str, str]] = {}   # id da tarefa -> (execução, id do projeto, etapa)
+
+    async def run_one(job: dict) -> None:
+        try:
+            await process(db, job, brain_for, images, video, pools)
+        except Exception as exc:  # noqa: BLE001 - falha ao gravar o desfecho
+            traceback.print_exc()
+            try:
+                db.finish_job(job["id"], "failed", error_code="WORKER_ERROR", error_message=str(exc))
+            except Exception:  # noqa: BLE001
+                pass
+
+    def publish() -> None:
+        state["jobs"] = [{"id": jid, "project_id": pid, "stage_key": stage} for jid, (_, pid, stage) in active.items()]
+        state["job"] = state["jobs"][0] if state["jobs"] else None
+
     try:
         while True:
+            for jid in [j for j, (task, _, _) in active.items() if task.done()]:
+                del active[jid]
+                idle_since = time.monotonic()
+            publish()
             try:
-                job = db.claim()
+                while len(active) < parallel:
+                    job = db.claim()
+                    if job is None:
+                        break
+                    if any(pid == job["project_id"] for _, pid, _ in active.values()):
+                        db.release_job(job["id"])   # um projeto por vez: esta tarefa espera a atual do mesmo projeto
+                        break
+                    active[job["id"]] = (asyncio.create_task(run_one(job)), job["project_id"], (job.get("input") or {}).get("stage_key") or job["job_type"])
+                    print(f"Iniciada tarefa de {(job.get('input') or {}).get('stage_key') or job['job_type']} ({len(active)}/{parallel} em andamento).", flush=True)
+                    publish()
             except Exception as exc:  # noqa: BLE001 - rede instável não derruba o worker
                 print(f"Sem acesso ao Supabase: {exc}", flush=True)
                 await asyncio.sleep(max(config.POLL_SECONDS, 10))
                 continue
-            if job is None:
-                # Terminou o que podia fazer (a etapa foi para a sua aprovação): libera o Chrome e só consulta a fila.
+            if not active:
+                # Nada em andamento (tudo foi para a sua aprovação): libera o Chrome e só consulta a fila.
                 if browser.is_open and time.monotonic() - idle_since > config.IDLE_CLOSE_SECONDS:
                     await browser.close()
                     print("Ocioso: Chrome do worker fechado. Reabre quando houver nova tarefa (após sua aprovação).", flush=True)
                 await asyncio.sleep(config.POLL_SECONDS)
-                continue
-            state["job"] = {"id": job["id"], "type": job["job_type"], "stage_key": (job.get("input") or {}).get("stage_key")}
-            try:
-                await process(db, job, brain_for, images, video)
-            except Exception as exc:  # noqa: BLE001 - falha ao gravar o desfecho
-                traceback.print_exc()
-                try:
-                    db.finish_job(job["id"], "failed", error_code="WORKER_ERROR", error_message=str(exc))
-                except Exception:  # noqa: BLE001
-                    pass
-            state["job"] = None
-            idle_since = time.monotonic()
+            else:
+                await asyncio.wait([task for task, _, _ in active.values()], timeout=config.POLL_SECONDS, return_when=asyncio.FIRST_COMPLETED)
     finally:
         beat.cancel()
         try:

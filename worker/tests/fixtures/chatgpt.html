@@ -8,6 +8,7 @@
 <main id="thread"></main>
 <div id="alerts"></div>
 <form id="form" onsubmit="return false">
+  <input type="file" id="decoy" class="hidden" accept="image/*" capture="environment" aria-label="Tirar uma foto">
   <input type="file" id="files" multiple>
   <div id="prompt-textarea" contenteditable="true" role="textbox" style="min-height:40px;border:1px solid #999"></div>
   <button type="button" data-testid="send-button" disabled>Send</button>

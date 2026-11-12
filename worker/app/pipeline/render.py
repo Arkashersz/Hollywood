@@ -186,7 +186,20 @@ def doc07(bible: dict, plan: dict) -> str:
     return "\n\n".join(parts)
 
 
-def doc08(bible: dict, clips: dict, max_clip: int) -> str:
+def image_catalog(bible: dict, plan: dict) -> dict[str, dict]:
+    """Imagens aprovadas que um clipe pode usar como referência: id -> {label, path}. O Claude escolhe pelos ids."""
+    out: dict[str, dict] = {}
+    for s in plan["scenes"]:
+        out[f"cena-{s['id']}"] = {"label": f"Imagem-base da cena {s['id']} ({s['environment']}; {', '.join(s['characters']) or 'sem personagens'})", "path": scene_path(s["id"])}
+    for e in plan["environments"]:
+        out[f"ambiente-{e['slug']}"] = {"label": f"Ambiente {e['name']}", "path": env_path(e)}
+    for c in visible(bible):
+        out[f"folha-{c['slug']}"] = {"label": f"Folha 16:9 de {c['name']}", "path": sheet_path(c)}
+        out[f"personagem-{c['slug']}"] = {"label": f"{c['name']} de corpo inteiro", "path": body_path(c)}
+    return out
+
+
+def doc08(bible: dict, clips: dict, max_clip: int, catalog: dict | None = None) -> str:
     parts = [
         f"**Total:** {len(clips['clips'])} clipes · **Soma das durações:** {clips['total_s']} s (meta: acima de 70 s) · **Máximo por clipe usado no planejamento:** {max_clip} s.",
         "O limite real de duração e os controles disponíveis devem ser conferidos na interface do Grok no momento da geração.",
@@ -194,9 +207,12 @@ def doc08(bible: dict, clips: dict, max_clip: int) -> str:
         "## Como gerar cada clipe", "1. Abrir o Grok no modo de vídeo a partir de imagem.\n2. Anexar a imagem inicial indicada.\n3. Colar o prompt exatamente como está.\n4. Conferir os itens da lista ao receber o clipe e baixar o arquivo original.",
     ]
     for c in clips["clips"]:
-        start = f"último quadro do clipe {c['n'] - 1:02d} (extraído automaticamente)" if c["start"] == "previous_last_frame" else f"`{scene_path(c['scene']).as_posix()}`"
+        refs = [f"`{(catalog[r]['path'] if catalog and r in catalog else Path(r)).as_posix()}`" for r in c.get("reference_images") or []]
+        if c["start"] == "previous_last_frame":
+            refs.insert(0, f"último quadro do clipe {c['n'] - 1:02d} (extraído automaticamente)")
+        start = ", ".join(refs) if refs else f"`{scene_path(c['scene']).as_posix()}`"
         parts += [f"## Clipe {c['n']:02d} · cena {c['scene']}",
-                  f"**Duração:** {c['duration_s']} s  \n**Imagem inicial:** {start}  \n**Arquivo:** `{clip_path(c['n']).as_posix()}`",
+                  f"**Duração:** {c['duration_s']} s  \n**Imagens anexadas (nesta ordem; a primeira é o quadro inicial):** {start}  \n**Arquivo:** `{clip_path(c['n']).as_posix()}`",
                   f"**Fala (DE):** {c['dialogue_de'] or '—'}  \n**Tradução (PT):** {c['dialogue_pt'] or '—'}",
                   "**Prompt:**", _code(clip_prompt(bible, c)),
                   f"**Continuidade:** {c['continuity_pt'] or NA}", "**Conferir ao receber:**", _bullets(c["check_pt"])]

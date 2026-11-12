@@ -37,6 +37,10 @@ class Db:
         rows = self.client.rpc("claim_next_job", {"p_worker_id": config.WORKER_ID}).execute().data or []
         return rows[0] if rows else None
 
+    def release_job(self, job_id: str) -> None:
+        """Devolve uma tarefa reivindicada à fila (ex.: o mesmo projeto já está sendo processado)."""
+        self.client.table("jobs").update({"status": "queued", "worker_id": None, "started_at": None}).eq("id", job_id).execute()
+
     def finish_job(self, job_id: str, status: str, *, output: dict | None = None, error_code: str | None = None, error_message: str | None = None) -> None:
         self.client.table("jobs").update({"status": status, "output": output or {}, "error_code": error_code,
                                           "error_message": (error_message or "")[:2000] or None, "finished_at": now()}).eq("id", job_id).execute()

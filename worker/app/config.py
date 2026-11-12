@@ -55,7 +55,9 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 REFERENCE_LANGUAGE = os.getenv("REFERENCE_LANGUAGE", "") or None  # ex.: de, pt, en; vazio = detectar
 
 # Produção. O limite real do Grok deve ser conferido na interface; este valor guia o roteiro.
-GROK_MAX_CLIP_SECONDS = _int("GROK_MAX_CLIP_SECONDS", 6)
+GROK_MAX_CLIP_SECONDS = _int("GROK_MAX_CLIP_SECONDS", 15)   # o Grok oferece clipes de 6, 10 ou 15 s
+GROK_RESOLUTION = os.getenv("GROK_RESOLUTION", "720p")        # sempre 720p; vazio = não mexer
+GROK_ASPECT = os.getenv("GROK_ASPECT", "9:16")                # vertical para TikTok; vazio = não mexer
 
 # Tempos de espera (segundos).
 TEXT_TIMEOUT = _int("TEXT_TIMEOUT", 600)
@@ -64,4 +66,9 @@ VIDEO_TIMEOUT = _int("VIDEO_TIMEOUT", 900)
 STALL_SECONDS = _int("STALL_SECONDS", 180)
 # Sem tarefas por este tempo (ex.: esperando a sua aprovação), o Chrome do worker é fechado; reabre sozinho na próxima tarefa.
 IDLE_CLOSE_SECONDS = _int("IDLE_CLOSE_SECONDS", 60)
+# Quantos itens do MESMO lote o worker gera ao mesmo tempo (uma aba do navegador por item). 1 = um por vez.
+# Quantos projetos (links) o worker conduz ao mesmo tempo. Os demais esperam na fila. 1 = um projeto por vez.
+MAX_PARALLEL_JOBS = max(1, min(4, _int("MAX_PARALLEL_JOBS", 3)))
+IMAGE_CONCURRENCY = max(1, min(4, _int("IMAGE_CONCURRENCY", 3)))
+VIDEO_CONCURRENCY = max(1, min(4, _int("VIDEO_CONCURRENCY", 1)))
 PAUSE_BETWEEN_ITEMS = _int("PAUSE_BETWEEN_ITEMS", 8)

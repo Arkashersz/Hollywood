@@ -155,3 +155,63 @@ def test_unknown_job_and_bad_source(world):
     assert outcome["status"] == "blocked" and outcome["error_code"] == "SOURCE_UNAVAILABLE"
     with pytest.raises(Blocked):
         media.fetch_source("ftp://x/y.mp4", config.PROJECTS_DIR / "z")
+
+
+def test_worker_runs_up_to_three_projects_at_once_and_never_two_jobs_of_the_same_project(monkeypatch):
+    from app import config, main
+
+    class QueueDb:
+        def __init__(self):
+            self.queue = [{"id": f"j{i}", "project_id": p, "job_type": "run_stage", "input": {"stage_key": "analysis"}}
+                          for i, p in enumerate(["p1", "p2", "p1", "p3", "p4"])]
+            self.finished, self.released = [], []
+
+        def requeue_stale(self): return 0
+        def heartbeat(self, *a, **k): pass
+        def claim(self): return self.queue.pop(0) if self.queue else None
+        def release_job(self, job_id):
+            self.released.append(job_id)
+            self.queue.insert(0, next(j for j in self.all if j["id"] == job_id))
+
+    class DummyBrowser:
+        is_open = False
+        async def close(self): pass
+
+    db = QueueDb()
+    db.all = list(db.queue)
+    running, peak, per_project, order = set(), [0], {}, []
+
+    async def fake_process(db_, job, brain_for, images, video, pools=None):
+        running.add(job["id"])
+        peak[0] = max(peak[0], len(running))
+        per_project[job["project_id"]] = per_project.get(job["project_id"], 0) + 1
+        assert per_project[job["project_id"]] == 1, "dois jobs do mesmo projeto ao mesmo tempo"
+        order.append(("start", job["id"]))
+        await asyncio.sleep(0.4)
+        per_project[job["project_id"]] -= 1
+        running.discard(job["id"])
+        order.append(("end", job["id"]))
+
+    monkeypatch.setattr(main, "Db", lambda: db)
+    monkeypatch.setattr(main, "Browser", DummyBrowser)
+    monkeypatch.setattr(main, "ChatGPT", lambda *a, **k: object())
+    monkeypatch.setattr(main, "Grok", lambda *a, **k: object())
+    monkeypatch.setattr(main, "process", fake_process)
+    monkeypatch.setattr(config, "SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.setattr(config, "SUPABASE_SECRET_KEY", "sb_secret_x")
+    monkeypatch.setattr(config, "MAX_PARALLEL_JOBS", 3)
+    monkeypatch.setattr(config, "BRAIN", "claude")
+    monkeypatch.setattr(config, "POLL_SECONDS", 0.05)
+
+    async def scenario():
+        task = asyncio.create_task(main.main())
+        await asyncio.sleep(2.5)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    asyncio.run(scenario())
+    assert peak[0] == 3, f"pico de {peak[0]} tarefas ao mesmo tempo"
+    assert [e for e in order if e[0] == "start"].__len__() == 5, "as 5 tarefas rodaram"
+    assert "j2" in db.released or order.index(("start", "j2")) > order.index(("end", "j0")), "o 2º job do p1 esperou o 1º"

@@ -28,6 +28,19 @@ def slugify(value: str, limit: int = 60) -> str:
     return value[:limit].strip("-") or "item"
 
 
+VIDEO_DURATIONS = (6, 10, 15)   # durações que o Grok oferece
+
+
+def snap_duration(requested: float | int | None, max_seconds: int = 15) -> int:
+    """Menor duração do Grok que comporta o clipe pedido (6, 10 ou 15 s). Sem pedido: 6 s."""
+    if requested is None or requested <= 0:
+        return VIDEO_DURATIONS[0]
+    for option in VIDEO_DURATIONS:
+        if option <= max_seconds and requested <= option + 0.01:
+            return option
+    raise ValueError(f"Duração de {requested} s acima do máximo do Grok ({min(max_seconds, VIDEO_DURATIONS[-1])} s)")
+
+
 def _run(cmd: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=timeout)
 

@@ -39,9 +39,9 @@ class ChatGPT:
             raise Blocked("UI_CHANGED", "O ChatGPT terminou sem texto legível na resposta.")
         return text
 
-    async def generate_image(self, prompt: str, refs: list[Path] | None, out_path: Path, *, timeout: int | None = None) -> dict:
-        """Gera uma imagem em uma conversa nova e salva o arquivo original em `out_path` (PNG)."""
-        snap, page = await self._exchange(self.IMAGE_PREFIX + prompt, refs or [], True, timeout or config.IMAGE_TIMEOUT, want_image=True)
+    async def generate_image(self, prompt: str, refs: list[Path] | None, out_path: Path, *, timeout: int | None = None, slot: int = 0) -> dict:
+        """Gera uma imagem em uma conversa nova (aba `slot`) e salva o arquivo original em `out_path` (PNG)."""
+        snap, page = await self._exchange(self.IMAGE_PREFIX + prompt, refs or [], True, timeout or config.IMAGE_TIMEOUT, want_image=True, slot=slot)
         if not snap["images"]:
             text = snap["text"]
             if common.looks_like_limit(text):
@@ -67,8 +67,8 @@ class ChatGPT:
         return {"width": width, "height": height}
 
     # ------------------------------------------------------------------
-    async def _exchange(self, prompt: str, files: list[Path], new_chat: bool, timeout: int, *, want_image: bool):
-        page = await self.browser.page("chatgpt")
+    async def _exchange(self, prompt: str, files: list[Path], new_chat: bool, timeout: int, *, want_image: bool, slot: int = 0):
+        page = await self.browser.page("chatgpt" if slot == 0 else f"chatgpt-{slot}")
         await page.bring_to_front()
         if new_chat or not page.url.startswith(self.url.rstrip("/")):
             await common.open_service(page, self.url, self.sel, self.service)

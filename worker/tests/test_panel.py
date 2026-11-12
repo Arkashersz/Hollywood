@@ -65,6 +65,7 @@ def panel(tmp_path_factory) -> str:
 class FakeSupabase:
     def __init__(self):
         self.rpc_calls: list[tuple[str, dict]] = []
+        self.removed: list[str] = []
         self.project = {"id": "11111111-aaaa-bbbb-cccc-000000000001", "title": "Anna und der Hund", "source_url": "https://www.tiktok.com/@x/video/1",
                         "status": "active", "current_stage": "character_images", "updated_at": NOW, "created_at": NOW}
         self.stages = [{"id": f"stage-{i}", "project_id": self.project["id"], "stage_key": key, "stage_order": i, "title": f"Etapa {key}",
@@ -121,6 +122,9 @@ class FakeSupabase:
         if path == "/storage/v1/object/sign/artifacts":
             paths = json.loads(request.post_data)["paths"]
             return await reply([{"path": p, "signedURL": f"/object/sign/artifacts/{p}?token=t", "error": None} for p in paths])
+        if request.method == "DELETE" and path == "/storage/v1/object/artifacts":
+            self.removed = json.loads(request.post_data or "{}").get("prefixes", [])
+            return await reply([])
         if path.startswith("/storage/v1/object/sign/artifacts/"):
             return await route.fulfill(status=200, headers={**headers, "content-type": "image/jpeg"}, body=self.jpeg)
         if path.startswith("/auth/v1/"):
@@ -244,8 +248,15 @@ def test_review_flow_sends_the_right_decisions(panel):
         assert await create.is_disabled()
         await page.get_by_placeholder("https://www.tiktok.com/").fill("https://www.tiktok.com/@y/video/2")
         await page.get_by_placeholder("Título (opcional)").fill("Segundo")
+        await page.get_by_role("radio", name="Cópia fiel").click()
         await create.click()
-        await page.get_by_text("Projeto criado.").wait_for()
+        await page.get_by_text("Projeto criado (cópia fiel).").wait_for()
+        await page.get_by_role("button", name="Excluir").first.click()
+        await page.get_by_role("button", name="Cancelar").click()
+        await page.get_by_role("button", name="Excluir").first.click()
+        await page.get_by_role("button", name="Sim, excluir").click()
+        await page.get_by_text("Projeto excluído.").wait_for()
+        assert fake.removed, "os arquivos do projeto devem ser removidos do Storage"
         return fake.rpc_calls
     calls = drive(panel, scenario)
     assert calls == [
@@ -253,7 +264,8 @@ def test_review_flow_sends_the_right_decisions(panel):
         ("decide_stage", {"p_stage_id": "stage-4", "p_decision": "request_changes", "p_comment": "Anna mais velha"}),
         ("decide_stage", {"p_stage_id": "stage-4", "p_decision": "approve"}),
         ("retry_stage", {"p_stage_id": "stage-5"}),
-        ("create_project", {"p_title": "Segundo", "p_source": "https://www.tiktok.com/@y/video/2"}),
+        ("create_project", {"p_title": "Segundo", "p_source": "https://www.tiktok.com/@y/video/2", "p_mode": "clone"}),
+        ("delete_project", {"p_project_id": "11111111-aaaa-bbbb-cccc-000000000001"}),
     ]
 
 

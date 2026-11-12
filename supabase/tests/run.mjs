@@ -193,6 +193,28 @@ await q(`select * from decide_stage($1,'approve')`, [prod.id]);
 assert.equal((await q(`select status from projects where id=$1`, [imp.id]))[0].status, 'completed');
 step('projeto com prompts prontos: etapas puladas, fila na primeira com itens, aprovação segue em frente e conclui');
 
+// --- clipe-piloto: aprovar o primeiro vídeo libera os demais ------------------------------
+const [pp] = await q(`select * from create_project_from_plan('Piloto', null, $1::jsonb)`, [JSON.stringify({ production: [{ name: 'a', prompt: 'p' }, { name: 'b', prompt: 'q' }] })]);
+await as(null, 'service_role');
+await db.query(`update jobs set status='succeeded' where project_id=$1`, [pp.id]);
+await db.query(`update project_stages set status='pending_review', payload=payload||'{"pilot":true}' where project_id=$1 and stage_key='production'`, [pp.id]);
+await as(A);
+const [pilotStage] = await q(`select id from project_stages where project_id=$1 and stage_key='production'`, [pp.id]);
+let [after] = await q(`select * from decide_stage($1,'approve')`, [pilotStage.id]);
+assert.equal(after.status, 'queued', 'aprovar o piloto reenfileira a mesma etapa em vez de concluí-la');
+assert.equal(after.payload.pilot, undefined);
+assert.equal(after.payload.pilot_approved, true);
+assert.equal((await q(`select status from projects where id=$1`, [pp.id]))[0].status, 'active');
+assert.equal((await q(`select * from jobs where project_id=$1 and status='queued'`, [pp.id])).length, 1);
+await as(null, 'service_role');
+await db.query(`update jobs set status='succeeded' where project_id=$1`, [pp.id]);
+await db.query(`update project_stages set status='pending_review' where id=$1`, [pilotStage.id]);
+await as(A);
+[after] = await q(`select * from decide_stage($1,'approve')`, [pilotStage.id]);
+assert.equal(after.status, 'approved', 'a aprovação do lote completo conclui a etapa');
+assert.equal((await q(`select status from projects where id=$1`, [pp.id]))[0].status, 'completed');
+step('clipe-piloto: aprovar o primeiro vídeo gera o restante; só a segunda aprovação conclui');
+
 // --- storage ------------------------------------------------------------------
 await as(null, 'service_role');
 await db.query(`insert into storage.objects(bucket_id,name) values ('artifacts',$1),('artifacts','outro/x.jpg')`, [`${project.id}/imagens/a.jpg`]);
@@ -203,3 +225,30 @@ assert.equal((await q(`select * from storage.objects`)).length, 0);
 step('bucket: só o dono do projeto lê as prévias');
 
 console.log('\nTodas as verificações de SQL passaram.');
+
+// --- modo cópia fiel (no fim: o projeto extra enfileira uma análise) ---------------
+await as(A);
+assert.equal(project.mode, 'inspired', 'modo padrão é inspirado');
+const [copy] = await q(`select * from create_project($1,$2,$3)`, ['Cópia', 'https://www.tiktok.com/@x/video/9', 'clone']);
+assert.equal(copy.mode, 'clone');
+assert.equal((await q(`select title from project_stages where project_id=$1 and stage_key='script'`, [copy.id]))[0].title, 'Roteiro fiel ao original');
+await fails(`select create_project('x','https://x','qualquer')`, [], /Modo inválido/);
+step('create_project aceita o modo cópia fiel (padrão: inspirado)');
+
+// --- excluir projeto -----------------------------------------------------------
+await as(B);
+await fails(`select delete_project($1)`, [copy.id], /Projeto não encontrado/);
+await as(null, 'service_role');
+await db.query(`update jobs set status='running' where project_id=$1`, [copy.id]);
+await as(A);
+await fails(`select delete_project($1)`, [copy.id], /trabalhando neste projeto/);
+await as(null, 'service_role');
+await db.query(`update jobs set status='succeeded' where project_id=$1`, [copy.id]);
+await as(A);
+await q(`select delete_project($1)`, [copy.id]);
+assert.equal((await q(`select * from projects where id=$1`, [copy.id])).length, 0);
+assert.equal((await q(`select * from project_stages where project_id=$1`, [copy.id])).length, 0);
+assert.equal((await q(`select * from jobs where project_id=$1`, [copy.id])).length, 0);
+step('delete_project: só o dono, não durante uma tarefa em andamento, e apaga tudo em cascata');
+
+console.log('Todas as verificações de SQL passaram.');

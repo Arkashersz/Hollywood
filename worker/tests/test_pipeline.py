@@ -39,6 +39,7 @@ PLAN = {
 def clips_payload(n=12, duration=6):
     return {"order_note_pt": "Em ordem.", "clips": [
         {"scene": "01" if i % 2 == 0 else "02", "duration_s": duration, "start": "previous_last_frame" if i == 1 else "scene_image",
+         "reference_images": ["folha-anna"] if i == 1 else ["cena-01" if i % 2 == 0 else "cena-02", "folha-anna"],
          "prompt": f'Clip {i}: Anna says "Hallo".', "speakers": ["Anna"] if i % 2 == 0 else [], "dialogue_de": "Hallo", "dialogue_pt": "Olá",
          "continuity_pt": "Segue.", "check_pt": ["rosto"]} for i in range(n)]}
 
@@ -78,7 +79,7 @@ class FakeLLM:
             return "## 1. Título\n\nHallo!"
         raise AssertionError("pedido inesperado: " + prompt[:80])
 
-    async def generate_image(self, prompt, refs, out_path):
+    async def generate_image(self, prompt, refs, out_path, *, slot=0):
         if self.fail_image_at is not None and len(self.images) == self.fail_image_at:
             self.fail_image_at = None
             raise Blocked("LIMIT_REACHED", "limite")
@@ -95,9 +96,11 @@ class FakeVideo:
         self.sample = sample
         self.calls: list[dict] = []
 
-    async def generate_video(self, prompt, start_image, out_path):
-        assert start_image is not None and Path(start_image).is_file()
-        self.calls.append({"prompt": prompt, "start": Path(start_image).name, "out": out_path.name})
+    async def generate_video(self, prompt, images, out_path, *, duration_s=None, slot=0):
+        images = [images] if isinstance(images, (str, Path)) else list(images or [])
+        assert all(Path(i).is_file() for i in images)
+        self.calls.append({"prompt": prompt, "start": Path(images[0]).name if images else None, "images": [Path(i).name for i in images],
+                           "out": out_path.name, "duration_s": duration_s})
         out_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(self.sample, out_path)
         return {"duration": 4.0}
@@ -112,11 +115,15 @@ def project(tmp_path, sample_video, monkeypatch):
     return ctx, llm, video, sink
 
 
-def run(ctx: Ctx, stage: str, **changes) -> dict:
+def run(ctx: Ctx, stage: str, auto_pilot: bool = True, **changes) -> dict:
     ctx.stage_key = stage
     for key, value in {"feedback": None, **changes}.items():
         setattr(ctx, key, value)
-    return asyncio.run(stages.run_stage(ctx))
+    result = asyncio.run(stages.run_stage(ctx))
+    if auto_pilot and result.get("pilot"):   # os testes comuns aprovam o clipe de teste e seguem
+        ctx.pilot_approved = True
+        result = asyncio.run(stages.run_stage(ctx))
+    return result
 
 
 def run_until(ctx: Ctx, last: str) -> None:
@@ -345,3 +352,150 @@ def test_imported_item_can_be_regenerated_alone(project):
     before = len(llm.images)
     asyncio.run(stages.regen_item(ctx, "imp-character_images-anna", "mais escuro"))
     assert len(llm.images) == before + 1 and "mais escuro" in llm.images[-1]["prompt"]
+
+
+def test_imported_clip_duration_comes_from_the_field_or_the_prompt(project):
+    ctx, llm, video, sink = project
+    ctx.max_clip = 15
+    ctx.plan = {"production": [{"name": "A", "prompt": "Anna waves.", "duration_s": 10}, {"name": "B", "prompt": "Anna talks for 12 seconds."},
+                               {"name": "C", "prompt": "Anna smiles."}]}
+    run(ctx, "production")
+    assert [c["duration_s"] for c in video.calls] == [10, 15, 6]
+
+
+def test_each_clip_attaches_exactly_the_images_claude_listed(project):
+    ctx, llm, video, sink = project
+    for stage in stages.ORDER:
+        run(ctx, stage)
+    clips = ctx.load_data("clips")["clips"]
+    assert len(video.calls) == len(clips) == 12
+    for clip, call in zip(clips, video.calls):
+        expected = [Path(p).name for p in [render.image_catalog(ctx.load_data("bible"), ctx.load_data("plan"))[r]["path"] for r in clip["reference_images"]]]
+        if clip["start"] == "previous_last_frame":
+            expected.insert(0, "inicio-clipe-%02d.png" % clip["n"])
+        assert call["images"] == expected, f"clipe {clip['n']}"
+        assert call["duration_s"] == clip["duration_s"]
+        assert call["prompt"].startswith(clip["prompt"])
+    assert [c["out"] for c in video.calls] == [f"clipe-{n:02d}.mp4" for n in range(1, 13)]
+    assert "folha-anna.png" in video.calls[2]["images"] and len(video.calls[2]["images"]) == 2
+
+
+def test_clip_reference_ids_must_exist_and_be_listed():
+    bible = {"characters": [{"name": "Anna", "slug": "anna", "voice_only": False}]}
+    plan = {"scenes": [{"id": "01"}]}
+    base = {"scene": "01", "duration_s": 6, "start": "scene_image", "prompt": "p", "speakers": []}
+    catalog = {"cena-01", "folha-anna"}
+    def run_validate(refs, n=13):
+        return core.validate_clips({"clips": [{**base, "reference_images": refs} for _ in range(n)]}, bible, plan, 6, catalog)
+    assert run_validate(["cena-01"])["clips"][0]["reference_images"] == ["cena-01"]
+    with pytest.raises(ValueError, match="não existem"):
+        run_validate(["cena-99"])
+    with pytest.raises(ValueError, match="informe em"):
+        run_validate([])
+
+
+def test_video_stage_generates_only_the_pilot_clip_until_approved(project):
+    ctx, llm, video, sink = project
+    for stage in stages.ORDER[:-1]:
+        run(ctx, stage)
+    first = run(ctx, "production", auto_pilot=False)
+    assert [c["out"] for c in video.calls] == ["clipe-01.mp4"], "só o clipe de teste"
+    assert first["pilot"] is True and first["pilot_remaining"] == 11
+    # pedir ajustes no piloto refaz só o primeiro clipe, com o comentário
+    again = run(ctx, "production", auto_pilot=False, feedback="rosto mais claro", version=2)
+    assert [c["out"] for c in video.calls] == ["clipe-01.mp4", "clipe-01.mp4"] and again["pilot"] is True
+    # aprovado o piloto: gera os 11 restantes e mantém o primeiro
+    rest = run(ctx, "production", feedback=None, version=2, pilot_approved=True)
+    assert [c["out"] for c in video.calls][2:] == [f"clipe-{n:02d}.mp4" for n in range(2, 13)]
+    assert "pilot" not in rest and "11 gerado(s) agora" in rest["summary"]
+
+
+class SlowLLM(FakeLLM):
+    """Mede quantas imagens estão em andamento ao mesmo tempo e em que aba (slot) cada uma rodou."""
+    def __init__(self):
+        super().__init__()
+        self.active = self.peak = 0
+        self.slots: list[int] = []
+        self.started: list[str] = []
+        self.finished: list[str] = []
+
+    async def generate_image(self, prompt, refs, out_path, *, slot=0):
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        self.slots.append(slot)
+        self.started.append(out_path.name)
+        await asyncio.sleep(0.15)
+        try:
+            return await super().generate_image(prompt, refs, out_path, slot=slot)
+        finally:
+            self.active -= 1
+            self.finished.append(out_path.name)
+
+
+def test_images_of_a_batch_run_three_at_a_time_in_separate_tabs(project):
+    ctx, llm, video, sink = project
+    slow = SlowLLM()
+    ctx.images = slow
+    for stage in ("analysis", "script", "character_bible"):
+        run(ctx, stage)
+    ctx.image_concurrency = 3
+    run(ctx, "character_images")
+    assert 2 <= slow.peak <= 3 and set(slow.slots) <= {0, 1, 2}
+
+
+def test_dependent_items_wait_for_their_wave_even_with_three_tabs(project):
+    ctx, llm, video, sink = project
+    slow = SlowLLM()
+    ctx.images = slow
+    for stage in ("analysis", "script", "character_bible", "character_images", "character_sheets", "visual_plan"):
+        run(ctx, stage)
+    ctx.image_concurrency = 3
+    run(ctx, "scene_images")
+    names = slow.started
+    env_done = slow.finished.index("ambiente-k-che.png")
+    first_scene_start = min(names.index(n) for n in names if n.startswith("cena-"))
+    assert first_scene_start >= 1 and env_done < len(slow.finished), "ambientes terminam antes de as cenas dependentes começarem"
+    assert slow.started.index("ambiente-k-che.png") < first_scene_start
+
+
+def test_one_failure_stops_new_items_but_keeps_what_finished(project):
+    ctx, llm, video, sink = project
+    for stage in ("analysis", "script", "character_bible"):
+        run(ctx, stage)
+    ctx.image_concurrency = 3
+    llm.fail_image_at = 1
+    with pytest.raises(Blocked) as err:
+        run(ctx, "character_images")
+    assert err.value.code == "LIMIT_REACHED"
+    done = len(llm.images)
+    run(ctx, "character_images")   # retoma: o que já saiu é mantido, só falta o que não saiu
+    assert len({i["out"] for i in llm.images}) == 2 and len(llm.images) <= done + 2
+
+
+def test_clone_mode_asks_for_a_faithful_copy_with_shot_map_swap_proposal_and_no_70s_rule(project):
+    ctx, llm, video, sink = project
+    ctx.clone = True
+    run(ctx, "analysis")
+    assert "REMAKE FIEL" in llm.asks[0]["prompt"] and "Mapa plano a plano" in llm.asks[0]["prompt"]
+    run(ctx, "script")
+    script = next(a["prompt"] for a in llm.asks if "ROTEIRISTA do REMAKE FIEL" in a["prompt"])
+    assert "Proposta de troca de blocos" in script and "manter 100% fiel" in script and "Câmera idêntica ao original" in script
+    assert "Teste de originalidade" not in script
+    result = run(ctx, "script", feedback="aplicar a troca", version=2)
+    revised = llm.asks[-1]["prompt"]
+    assert "aplicar a troca" in revised and "APLICADO" in revised and "troca de blocos" in result["summary"] or "troca" in result["summary"]
+    run(ctx, "character_bible")
+    assert "cópia fiel" in llm.asks[-1]["prompt"]
+    run(ctx, "character_images"); run(ctx, "character_sheets"); run(ctx, "visual_plan")
+    assert "Uma cena por plano do original" in llm.asks[-1]["prompt"]
+    run(ctx, "scene_images")
+    out = run(ctx, "video_prompts")   # clipes curtos: a regra de 70 s não vale na cópia fiel
+    assert any("copie no prompt de cada clipe o movimento de câmera" in a["prompt"] for a in llm.asks)
+    assert out is not None
+
+
+def test_inspired_mode_is_unchanged(project):
+    ctx, llm, _, _ = project
+    run(ctx, "analysis"); run(ctx, "script")
+    assert not any("REMAKE FIEL" in a["prompt"] for a in llm.asks)
+    assert any("Teste de originalidade" in a["prompt"] for a in llm.asks)

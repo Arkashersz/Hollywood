@@ -47,6 +47,9 @@ def site(tmp_path_factory, sample_video) -> str:
     Image.new("RGB", (32, 32), (0, 0, 0)).save(root / "icon.png")
     shutil.copy(sample_video, root / "clip.mp4")
     shutil.copy(sample_video, root / "old.mp4")
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=720x1280:rate=12:duration=6",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=6", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+                    str(root / "hd.mp4")], check=True)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(_Quiet, directory=str(root)))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_address[1]}"

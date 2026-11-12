@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..errors import Blocked
-from ..media import slugify
+from ..media import slugify, snap_duration
 from . import prompts
 
 DOCS = {
@@ -66,6 +66,12 @@ class Ctx:
     whisper_model: str = "small"
     language: str | None = None
     pause: Callable | None = None   # espera entre gerações (injetável nos testes)
+    image_slots: object = None      # abas do ChatGPT compartilhadas entre os projetos em andamento (asyncio.Queue de números)
+    video_slots: object = None
+    image_concurrency: int = 1      # imagens geradas ao mesmo tempo (uma aba por item)
+    video_concurrency: int = 1
+    pilot_approved: bool = False    # o clipe-piloto já foi aprovado: a etapa de vídeos gera o restante
+    clone: bool = False             # modo cópia fiel: roteiro, cortes e câmera idênticos ao original
     plan: dict | None = None        # prompts trazidos prontos pelo usuário (projeto iniciado numa etapa avançada)
     _generated: dict = field(default_factory=dict)
 
@@ -273,7 +279,7 @@ def validate_plan(raw: dict, bible: dict) -> dict:
     return {"areas": areas, "environments": envs, "scenes": scenes}
 
 
-def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int) -> dict:
+def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int, catalog: set[str] | None = None, min_total: int = 70) -> dict:
     scene_ids = {s["id"] for s in plan["scenes"]}
     names = {c["name"].casefold(): c["name"] for c in bible["characters"]}
     clips_raw = raw.get("clips")
@@ -293,17 +299,27 @@ def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int) -> dict:
             raise ValueError(f'{where}: "duration_s" precisa ser um número') from None
         if not 1 <= duration <= max_clip:
             raise ValueError(f'{where}: "duration_s" = {duration} está fora de 1–{max_clip} s')
+        duration = snap_duration(duration, max_clip)   # o Grok só faz 6, 10 ou 15 s
         start = "previous_last_frame" if "previous" in str(c.get("start", "")).lower() and i > 1 else "scene_image"
         speakers = []
         for n in _strings(c, "speakers"):
             if n.casefold() not in names:
                 raise ValueError(f'{where}: quem fala ("{n}") não é um personagem conhecido')
             speakers.append(names[n.casefold()])
-        clips.append({"n": i, "scene": scene, "duration_s": duration, "start": start, "prompt": _text(c, "prompt", where),
+        refs = _strings(c, "reference_images")
+        if catalog is not None:
+            unknown = [r for r in refs if r not in catalog]
+            if unknown:
+                raise ValueError(f'{where}: "reference_images" tem ids que não existem: {unknown} (use só {sorted(catalog)})')
+            if len(set(refs)) != len(refs) or len(refs) > 3:
+                raise ValueError(f'{where}: "reference_images" precisa ter de 1 a 3 ids diferentes')
+            if not refs and start != "previous_last_frame":
+                raise ValueError(f'{where}: informe em "reference_images" a(s) imagem(ns) deste clipe (a primeira é o quadro inicial)')
+        clips.append({"n": i, "scene": scene, "duration_s": duration, "start": start, "reference_images": refs, "prompt": _text(c, "prompt", where),
                       "speakers": speakers, "dialogue_de": _text(c, "dialogue_de", where, required=False),
                       "dialogue_pt": _text(c, "dialogue_pt", where, required=False),
                       "continuity_pt": _text(c, "continuity_pt", where, required=False), "check_pt": _strings(c, "check_pt")})
     total = sum(c["duration_s"] for c in clips)
-    if total <= 70:
-        raise ValueError(f"a soma das durações é {total} s; precisa ficar acima de 70 s (acrescente ou alongue clipes, respeitando o máximo por clipe)")
+    if min_total and total <= min_total:
+        raise ValueError(f"a soma das durações é {total} s; precisa ficar acima de {min_total} s (acrescente ou alongue clipes, respeitando o máximo por clipe)")
     return {"order_note_pt": _text(raw, "order_note_pt", "raiz", required=False), "clips": clips, "total_s": total}

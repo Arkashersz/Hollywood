@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -32,12 +33,26 @@ class Item:
     prompt: str
     refs: Callable[[], list[Path]]
     kind: str = "image"   # image | video
+    duration: int | None = None   # só vídeo: segundos pedidos (o Python escolhe 6, 10 ou 15 no Grok)
+    wave: int = 0                 # itens da mesma onda podem rodar juntos; uma onda só começa quando a anterior termina
 
 
 # ---------------------------------------------------------------------------
 # Projeto iniciado com prompts prontos (sem as etapas de texto)
 # ---------------------------------------------------------------------------
 IMPORT_DIRS = {"character_images": "personagens", "character_sheets": "folhas", "scene_images": "cenas", "production": "clipes"}
+
+
+def _imported_duration(entry: dict, prompt: str, max_clip: int) -> int:
+    """Duração do clipe importado: campo "Duração" informado; senão a que o prompt cita ("10 seconds"); senão 6 s."""
+    raw = entry.get("duration_s")
+    if raw in (None, ""):
+        found = re.search(r"\b(\d{1,2})\s*(?:-|\s)?\s*(?:s|sec|secs|second|seconds|segundos?)\b", prompt, re.I)
+        raw = found.group(1) if found else None
+    try:
+        return media.snap_duration(float(raw) if raw is not None else None, max_clip)
+    except (TypeError, ValueError) as exc:
+        raise Blocked("MISSING_INPUT", f"Duração inválida num clipe importado: {exc}") from None
 
 
 def _imported_items(ctx: Ctx, stage_key: str) -> list[Item]:
@@ -68,6 +83,7 @@ def _imported_items(ctx: Ctx, stage_key: str) -> list[Item]:
 
     items: list[Item] = []
     used: set[str] = set()
+    waves: dict[str, int] = {}   # nome -> onda: quem usa outra imagem DESTA etapa como referência espera por ela
     for index, entry in enumerate(plan.get(stage_key) or [], 1):
         name, prompt = str(entry["name"]).strip(), str(entry["prompt"]).strip()
         slug = slugify(name, 50)
@@ -82,20 +98,23 @@ def _imported_items(ctx: Ctx, stage_key: str) -> list[Item]:
             def start_image(start=start, name=name, previous=previous, index=index) -> list[Path]:
                 if not start:
                     return []
-                if start.casefold() in ("anterior", "previous", "ultimo quadro", "último quadro"):
+                if start.casefold() in ("anterior", "previous", "ultimo quadro", "último quadro"):  # só sozinho
                     if previous is None or not previous.is_file():
                         raise Blocked("MISSING_INPUT", f'"{name}" continua do clipe anterior, que ainda não existe.')
                     frame = ctx.dir / "videos" / "_quadros" / f"inicio-{index:02d}.png"
                     frame.parent.mkdir(parents=True, exist_ok=True)
                     return [media.last_frame(previous, frame)]
-                return resolve([start], name)
+                return resolve([x.strip() for x in start.split(",") if x.strip()], name)
 
             items.append(Item(f"imp-video-{index:02d}-{slug}", f"{index:02d} · {name}", ctx.dir / "videos" / "importados" / f"{index:02d}-{slug}.mp4",
-                              prompt, start_image, "video"))
+                              prompt, start_image, "video", _imported_duration(entry, prompt, ctx.max_clip),
+                              wave=(items[-1].wave + 1) if start.casefold() in ("anterior", "previous", "ultimo quadro", "último quadro") and items else 0))
         else:
             refs = [str(r) for r in entry.get("refs") or []]
+            wave = 1 + max([waves.get(r.strip().casefold(), -1) for r in refs], default=-1)
+            waves[name.casefold()] = wave
             items.append(Item(f"imp-{stage_key}-{slug}", name, ctx.dir / "imagens" / IMPORT_DIRS[stage_key] / f"{slug}.png",
-                              prompt, lambda refs=refs, name=name: resolve(refs, name)))
+                              prompt, lambda refs=refs, name=name: resolve(refs, name), wave=wave))
     return items
 
 
@@ -133,7 +152,7 @@ async def analysis(ctx: Ctx) -> dict:
         warnings.append("Metadados do post (autor, legenda, data, métricas) não foram obtidos.")
 
     ctx.log("Pedindo a ficha da referência ao Claude…")
-    body01 = await ctx.brain.ask(prompts.doc01(evidence, ctx.previous("01"), ctx.feedback), attachments)
+    body01 = await ctx.brain.ask(prompts.doc01(evidence, ctx.previous("01"), ctx.feedback, ctx.clone), attachments)
     prev02 = ctx.previous("02")
     ctx.write_doc("01", render.identification(evidence) + "\n\n" + strip_leading_title(body01))
     ctx.log("Pedindo a análise de edição ao Claude…")
@@ -148,9 +167,11 @@ async def analysis(ctx: Ctx) -> dict:
 # 2 · Roteiro
 # ---------------------------------------------------------------------------
 async def script(ctx: Ctx) -> dict:
-    prompt = prompts.doc03(ctx.read_doc("01"), ctx.read_doc("02"), ctx.max_clip, ctx.previous("03"), ctx.feedback)
-    ctx.log("Pedindo o roteiro em alemão ao Claude…")
+    prompt = prompts.doc03(ctx.read_doc("01"), ctx.read_doc("02"), ctx.max_clip, ctx.previous("03"), ctx.feedback, ctx.clone)
+    ctx.log("Pedindo o roteiro " + ("fiel ao original, em alemão, " if ctx.clone else "em alemão ") + "ao Claude…")
     ctx.write_doc("03", await ctx.brain.ask(prompt, []))
+    if ctx.clone:
+        return {"summary": "Roteiro fiel ao original escrito (mesmos cortes, cenas e câmera). Leia a seção 7: há uma proposta de troca de blocos de cena. Aprovar mantém 100% fiel; para aplicar a troca, peça revisão escrevendo “aplicar a troca”."}
     return {"summary": "Roteiro em alemão escrito, com tradução e conta de duração."}
 
 
@@ -164,7 +185,7 @@ def _previous_data(ctx: Ctx, name: str) -> str | None:
 
 
 async def character_bible(ctx: Ctx) -> dict:
-    prompt = prompts.bible(ctx.read_doc("01"), ctx.read_doc("03"), _previous_data(ctx, "bible"), ctx.feedback)
+    prompt = prompts.bible(ctx.read_doc("01"), ctx.read_doc("03"), _previous_data(ctx, "bible"), ctx.feedback, ctx.clone)
     ctx.log("Pedindo personagens, estilo e vozes ao Claude…")
     bible = await ask_json(ctx.brain, prompt, validate_bible)
     ctx.save_data("bible", bible)
@@ -183,8 +204,9 @@ async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note
     """Gera os itens pendentes, um por vez. Itens já prontos nesta versão são mantidos."""
     if only is not None and only not in {i.key for i in items}:
         raise Blocked("MISSING_INPUT", f"Item desconhecido nesta etapa: {only}")
-    made = kept = 0
-    for index, item in enumerate(items, 1):
+    kept = made = 0
+    todo: list[Item] = []
+    for item in items:
         if only is not None and item.key != only:
             continue
         recorded = ctx.generated_version(item.key)
@@ -192,25 +214,64 @@ async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note
             ctx.sink.file(ctx.stage_key, item.key, item.name, item.path, item.kind, _meta(item))
             kept += 1
             continue
-        if made and ctx.pause:
-            await ctx.pause()
-        ctx.sink.progress(ctx.stage_key, index - 1, len(items), f"Gerando {item.name}…")
-        prompt = item.prompt + (f"\n\nRequested adjustment (from the user): {note}" if note else "")
-        refs = item.refs()
-        if item.kind == "video":
-            info = await ctx.video.generate_video(prompt, refs[0] if refs else None, item.path)
-        else:
-            info = await ctx.images.generate_image(prompt, refs, item.path)
-        ctx.mark_generated(item.key)
-        ctx.sink.file(ctx.stage_key, item.key, item.name, item.path, item.kind, {**_meta(item), **(info or {})})
-        ctx.log(f"Gerado: {item.name}.")
-        made += 1
-    ctx.sink.progress(ctx.stage_key, len(items), len(items), "Concluído")
+        todo.append(item)
+
+    total, finished = len(items), kept
+    video = bool(todo) and todo[0].kind == "video"
+    width = max(1, ctx.video_concurrency if video else ctx.image_concurrency)
+    shared = ctx.video_slots if video else ctx.image_slots   # com vários projetos, as abas são divididas entre eles
+    slots: asyncio.Queue[int] = shared if shared is not None else asyncio.Queue()
+    if shared is None:
+        for n in range(width):
+            slots.put_nowait(n)
+    state = {"error": None, "last_start": 0.0}
+    loop = asyncio.get_event_loop()
+
+    async def one(item: Item) -> None:
+        nonlocal made, finished
+        slot = await slots.get()
+        try:
+            if state["error"] is not None:   # outro item já parou o lote: não começa mais nada
+                return
+            if ctx.pause and state["last_start"]:   # intervalo entre inícios, para não disparar tudo de uma vez
+                await ctx.pause()
+            state["last_start"] = loop.time()
+            ctx.sink.progress(ctx.stage_key, finished, total, f"Gerando {item.name}…")
+            prompt = item.prompt + (f"\n\nRequested adjustment (from the user): {note}" if note else "")
+            refs = item.refs()
+            if item.kind == "video":
+                info = await ctx.video.generate_video(prompt, refs, item.path, duration_s=item.duration, slot=slot)
+            else:
+                info = await ctx.images.generate_image(prompt, refs, item.path, slot=slot)
+            ctx.mark_generated(item.key)
+            await asyncio.to_thread(ctx.sink.file, ctx.stage_key, item.key, item.name, item.path, item.kind, {**_meta(item), **(info or {})})
+            ctx.log(f"Gerado: {item.name}.")
+            made += 1
+            finished += 1
+        except Exception as exc:  # noqa: BLE001 - guarda o primeiro erro; os itens já em andamento terminam sozinhos
+            state["error"] = state["error"] or exc
+        finally:
+            slots.put_nowait(slot)
+
+    # Com um por vez vale a ordem da lista (quem depende de outro item vem depois dele). Com vários ao mesmo tempo,
+    # os itens se dividem em ondas: uma onda só começa quando a anterior termina.
+    for wave in (sorted({i.wave for i in todo}) if width > 1 else [None]):
+        group = [i for i in todo if wave is None or i.wave == wave]
+        await asyncio.gather(*(one(i) for i in group))
+        if state["error"] is not None:
+            raise state["error"]
+    ctx.sink.progress(ctx.stage_key, total, total, "Concluído")
     return {"made": made, "kept": kept}
 
 
 def _meta(item: Item) -> dict:
-    return {"prompt": item.prompt}
+    meta = {"prompt": item.prompt}
+    if item.kind == "video":
+        try:
+            meta["references"] = [p.name for p in item.refs()]
+        except Blocked:
+            pass
+    return meta
 
 
 def _character_items(ctx: Ctx) -> list[Item]:
@@ -230,29 +291,39 @@ def _scene_items(ctx: Ctx) -> list[Item]:
     chars = {c["name"]: c for c in bible["characters"]}
     envs = {e["name"]: e for e in plan["environments"]}
     items = [Item(f"img-ambiente-{e['slug']}", f"Ambiente · {e['name']}", ctx.dir / render.env_path(e),
-                  render.environment_prompt(bible, e), lambda: []) for e in plan["environments"]]
+                  render.environment_prompt(bible, e), lambda: []) for e in plan["environments"]]   # onda 0: as cenas usam estes ambientes
     for s in plan["scenes"]:
         refs = [ctx.dir / render.sheet_path(chars[n]) for n in s["characters"]] + [ctx.dir / render.env_path(envs[s["environment"]])]
         items.append(Item(f"img-cena-{s['id']}", f"Cena {s['id']} · imagem-base", ctx.dir / render.scene_path(s["id"]),
-                          render.scene_prompt(bible, plan, s), lambda refs=refs: refs))
+                          render.scene_prompt(bible, plan, s), lambda refs=refs: refs, wave=1))
     return items
 
 
 def _clip_items(ctx: Ctx) -> list[Item]:
     bible, clips = ctx.load_data("bible"), ctx.load_data("clips")
+    catalog = render.image_catalog(bible, ctx.load_data("plan"))
 
     def start_image(clip: dict) -> list[Path]:
+        """Exatamente as imagens que o Claude indicou para este clipe, na ordem (a primeira é o quadro inicial)."""
+        listed = clip.get("reference_images")
+        paths = [ctx.dir / catalog[r]["path"] for r in listed] if listed else ([] if clip["start"] == "previous_last_frame" else [ctx.dir / render.scene_path(clip["scene"])])
+        missing = [p for p in paths if not p.is_file()]
+        if missing:
+            raise Blocked("MISSING_INPUT", f"O clipe {clip['n']:02d} usa imagens que ainda não existem: {', '.join(p.name for p in missing)}")
         if clip["start"] != "previous_last_frame":
-            return [ctx.dir / render.scene_path(clip["scene"])]
+            return paths
         previous = ctx.dir / render.clip_path(clip["n"] - 1)
         if not previous.is_file():
             raise Blocked("MISSING_INPUT", f"O clipe {clip['n']:02d} continua do clipe anterior, que ainda não existe: {previous}")
         frame = ctx.dir / "videos" / "_quadros" / f"inicio-clipe-{clip['n']:02d}.png"
         frame.parent.mkdir(parents=True, exist_ok=True)
-        return [media.last_frame(previous, frame)]
+        return [media.last_frame(previous, frame), *paths]
 
+    depth: dict[int, int] = {}
+    for c in clips["clips"]:
+        depth[c["n"]] = depth.get(c["n"] - 1, 0) + 1 if c["start"] == "previous_last_frame" else 0
     return [Item(f"vid-clipe-{c['n']:02d}", f"Clipe {c['n']:02d} · cena {c['scene']} · {c['duration_s']} s", ctx.dir / render.clip_path(c["n"]),
-                 render.clip_prompt(bible, c), lambda c=c: start_image(c), "video") for c in clips["clips"]]
+                 render.clip_prompt(bible, c), lambda c=c: start_image(c), "video", c["duration_s"], wave=depth[c["n"]]) for c in clips["clips"]]
 
 
 _BUILDERS: dict[str, Callable[[Ctx], list[Item]]] = {
@@ -298,7 +369,7 @@ async def character_sheets(ctx: Ctx) -> dict:
 # ---------------------------------------------------------------------------
 async def visual_plan(ctx: Ctx) -> dict:
     bible = ctx.load_data("bible")
-    prompt = prompts.visual_plan(ctx.read_doc("03"), bible, _previous_data(ctx, "plan"), ctx.feedback)
+    prompt = prompts.visual_plan(ctx.read_doc("03"), bible, _previous_data(ctx, "plan"), ctx.feedback, ctx.clone)
     ctx.log("Pedindo ambientes e imagens-base ao Claude…")
     plan = await ask_json(ctx.brain, prompt, lambda raw: validate_plan(raw, bible))
     ctx.save_data("plan", plan)
@@ -320,11 +391,12 @@ async def scene_images(ctx: Ctx) -> dict:
 async def video_prompts(ctx: Ctx) -> dict:
     bible, plan = ctx.load_data("bible"), ctx.load_data("plan")
     prev09, prev10 = ctx.previous("09"), ctx.previous("10")
-    prompt = prompts.clips(ctx.read_doc("02"), ctx.read_doc("03"), bible, plan, ctx.max_clip, _previous_data(ctx, "clips"), ctx.feedback)
+    catalog = render.image_catalog(bible, plan)
+    prompt = prompts.clips(ctx.read_doc("02"), ctx.read_doc("03"), bible, plan, ctx.max_clip, _previous_data(ctx, "clips"), ctx.feedback, catalog, ctx.clone)
     ctx.log("Pedindo os prompts de vídeo ao Claude…")
-    clips = await ask_json(ctx.brain, prompt, lambda raw: validate_clips(raw, bible, plan, ctx.max_clip))
+    clips = await ask_json(ctx.brain, prompt, lambda raw: validate_clips(raw, bible, plan, ctx.max_clip, set(catalog), 0 if ctx.clone else 70))
     ctx.save_data("clips", clips)
-    ctx.write_doc("08", render.doc08(bible, clips, ctx.max_clip))
+    ctx.write_doc("08", render.doc08(bible, clips, ctx.max_clip, catalog))
     ctx.log("Pedindo o plano de edição ao Claude…")
     ctx.write_doc("09", await ctx.brain.ask(prompts.doc09(prev09, ctx.feedback), [], new_chat=False))
     metadata = {}
@@ -339,9 +411,15 @@ async def video_prompts(ctx: Ctx) -> dict:
 
 async def production(ctx: Ctx) -> dict:
     items = items_for(ctx, "production")
+    if len(items) > 1 and not ctx.pilot_approved:
+        # Segurança: só o primeiro clipe é gerado; o restante depende da sua aprovação deste teste.
+        await generate(ctx, items[:1], note=ctx.feedback)
+        ctx.log("Clipe de teste pronto. Os demais só serão gerados depois que você aprovar este primeiro.")
+        return {"summary": f"Clipe de teste gerado ({items[0].name}). Confira duração, imagens usadas, rosto, voz e movimento; aprovar libera os outros {len(items) - 1} clipes no Grok.",
+                "pilot": True, "pilot_remaining": len(items) - 1}
     stats = await generate(ctx, items, note=ctx.feedback)
     total = round(sum(media.probe(i.path)["duration"] for i in items), 1)
-    warnings = [] if (total > 70 or ctx.plan) else [f"A soma real dos clipes é {total} s, abaixo da meta de 70 s. Regenere clipes mais longos ou acrescente cenas."]
+    warnings = [] if (total > 70 or ctx.plan or ctx.clone) else [f"A soma real dos clipes é {total} s, abaixo da meta de 70 s. Regenere clipes mais longos ou acrescente cenas."]
     return {"summary": f"{len(items)} clipe(s), {total} s no total ({stats['made']} gerado(s) agora). Próximo passo: editar no CapCut conforme o Documento 09.",
             "warnings": warnings}
 

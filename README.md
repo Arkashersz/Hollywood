@@ -59,6 +59,27 @@ Na primeira vez, crie a conta no painel, cole o link do TikTok (ou o caminho de 
 
 Os arquivos originais ficam em `runtime/projects/<id do projeto>/` (documentos `.md`, `imagens/`, `videos/`). O Supabase guarda os textos e prévias leves.
 
+## Vídeos no Grok (feito pelo Python, sem o Claude)
+
+O Claude só escreve o prompt e a duração de cada clipe. Quem opera o Grok é o Python: escolhe **720p** (sempre), a duração (**6, 10 ou 15 s**, a menor que comporta o clipe), a proporção vertical 9:16, confere na tela que as opções ficaram aplicadas antes de enviar e só baixa o vídeo **novo** que nasceu desse envio, com a duração e a resolução pedidas (vídeos antigos da página ou fora do pedido são ignorados; se nenhum servir, a etapa para e explica). Ajustes em `worker/.env`: `GROK_RESOLUTION`, `GROK_ASPECT` (vazio = não mexer), `GROK_MAX_CLIP_SECONDS`. Nos prompts importados, use `Duração: 10` no bloco do clipe; sem isso vale o que o prompt cita ("10 seconds") ou 6 s.
+
+## Vários projetos e geração simultânea
+
+**Vários projetos ao mesmo tempo:** o worker conduz até `MAX_PARALLEL_JOBS=3` projetos (links) em paralelo; do quarto em diante, esperam na fila. Nunca há duas tarefas do mesmo projeto ao mesmo tempo, e as abas do ChatGPT e do Grok são divididas entre os projetos (as imagens de um projeto não esperam o fim do outro por inteiro, só pela vez nas abas). Cada projeto continua parando para a sua aprovação em cada etapa. Com `BRAIN=chatgpt` o worker volta a um projeto por vez.
+
+**Dentro de um projeto:**
+
+Dentro de uma etapa, o worker gera vários itens ao mesmo tempo, cada um numa aba própria do Chrome do worker: `IMAGE_CONCURRENCY=3` (padrão) para imagens do ChatGPT e `VIDEO_CONCURRENCY=1` para vídeos do Grok (1 a 4; 1 = um por vez). Itens que dependem de outros (cenas que usam os ambientes; clipes que continuam do anterior) esperam a sua vez. Se um item para por login, limite ou erro, nenhum novo começa, os que já estavam em andamento terminam e tudo o que saiu é mantido ao tentar de novo. Dentro de um mesmo projeto, as etapas de texto do Claude continuam uma por vez.
+
+## Dois modos de roteiro
+
+Ao enviar o link você escolhe:
+
+- **Inspirado** (padrão): o Claude entende a história e escreve um roteiro novo, mudando identidade, local, falas e objetos.
+- **Cópia fiel**: roteiro, quantidade de cenas e cortes, durações, falas e câmera idênticos ao original; só muda o personagem/elemento central (banana → morango) e o que depende dele. A análise gera um mapa plano a plano (câmera exata de cada corte) que o roteiro, as imagens e os prompts de vídeo copiam. Na etapa do roteiro o Claude escreve a versão 100% fiel e, na seção 7, propõe a troca de alguns **blocos de cena** (só o local, nunca a história). Aprovar mantém 100% fiel; para aplicar a troca, peça revisão escrevendo “aplicar a troca” (ou diga quais blocos). A regra de “acima de 70 s” não vale: a duração segue a do original.
+
+Exige a migração `0007_clone_mode.sql` (SQL Editor do Supabase).
+
 ## Quando uma etapa para
 
 O worker nunca digita senha, resolve CAPTCHA, contorna limite ou insiste às cegas. Ele para, explica no painel e espera você:
@@ -79,7 +100,7 @@ Verificado:
 
 - **ChatGPT real (imagens):** sessão ativa; uma imagem de personagem (1024×1536) e uma folha 16:9 (1672×941) geradas com a imagem anterior como referência, baixadas em PNG e com identidade consistente.
 
-**Ainda não verificado**: todo o fluxo de vídeo no Grok logado (não testado de propósito) e a leitura de respostas de *texto* do ChatGPT (só usada com `BRAIN=chatgpt`). Faça o primeiro projeto acompanhando a janela do Chrome; espere ajustar seletores. Também falta um projeto completo passando pelo painel com um vídeo real do TikTok.
+**Ainda não verificado**: a geração e o download de vídeo no Grok logado (não testado de propósito; os controles de resolução, duração e proporção foram apenas lidos na tela, sem gerar nada) e a leitura de respostas de *texto* do ChatGPT (só usada com `BRAIN=chatgpt`). Faça o primeiro projeto acompanhando a janela do Chrome; espere ajustar seletores. Também falta um projeto completo passando pelo painel com um vídeo real do TikTok.
 
 Automatizar a interface desses serviços pode contrariar os termos de uso deles e levar a restrições na conta; as APIs oficiais são o caminho suportado. A decisão de usar o navegador é sua.
 

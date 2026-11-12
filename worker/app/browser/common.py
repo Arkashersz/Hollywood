@@ -70,8 +70,28 @@ async def attach(page, sel: dict, files: list[Path], service: str) -> None:
     inputs = page.locator(sel["file_input"])
     if await inputs.count() == 0:
         raise Blocked("UI_CHANGED", f"O {service} não ofereceu campo de anexo.")
-    await inputs.first.set_input_files([str(f) for f in files])
+    target = await _pick_file_input(inputs, len(files))
+    if target is None:
+        raise Blocked("UI_CHANGED", f"O {service} só ofereceu campos de anexo de um arquivo (ex.: câmera) e a etapa precisa de {len(files)}.",
+                      "Rode `python -m app.cli check` e ajuste `worker/selectors.json` (file_input).")
+    await target.set_input_files([str(f) for f in files])
     await asyncio.sleep(1.5)
+
+
+async def _pick_file_input(inputs, wanted: int):
+    """Escolhe o campo de anexo certo: ignora o de câmera/foto e, com vários arquivos, exige um campo `multiple`."""
+    best = None
+    for i in range(min(await inputs.count(), 12)):
+        candidate = inputs.nth(i)
+        info = await candidate.evaluate("e => ({multiple: e.multiple, capture: e.hasAttribute('capture'), label: e.getAttribute('aria-label') || ''})")
+        if info["capture"] or re.search(r"foto|photo|camera|câmera", info["label"], re.I):
+            continue
+        if wanted > 1 and not info["multiple"]:
+            continue
+        if info["multiple"]:
+            return candidate
+        best = best or candidate
+    return best
 
 
 async def write(page, sel: dict, prompt: str, service: str) -> None:

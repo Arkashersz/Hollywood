@@ -25,13 +25,21 @@ DEFAULTS: dict[str, dict[str, str]] = {
     "grok": {
         "composer": "textarea, div[contenteditable='true']",
         "send": "button[type='submit'], button[aria-label*='Submit' i], button[aria-label*='Send' i], button[aria-label*='Enviar' i]",
-        "file_input": "input[type='file']",
+        # Só o campo de anexo da caixa de criação: a página tem outros (cartões "Editar texto", "Edição Precisa"…) que NÃO servem.
+        "file_input": "form input[type='file']",
+        # Miniatura que aparece na caixa de criação depois de anexar a imagem inicial.
+        "attachment": "form img",
         "login": "a[href*='sign-in'], a[href*='/login'], a[href*='accounts.x.ai']",
         "video": "video",
         "download": "button[aria-label*='Download' i], a[download], button[aria-label*='Baixar' i], button[aria-label*='Transferir' i]",
         "alert": "[role='alert'], [data-sonner-toast]",
         # Botão que coloca a caixa em modo vídeo (clicado antes de anexar; vazio = não clicar).
         "video_mode": "button[aria-label='Vídeo'], button[aria-label='Video']",
+        # Opções do modo vídeo (conferidas na conta em 11/11/2026): botões que abrem menus de itens `menuitemradio`.
+        "resolution_button": "button[aria-label='Resolução do vídeo'], button[aria-label='Video resolution']",
+        "duration_button": "button[aria-label='Duração do vídeo'], button[aria-label='Video duration']",
+        "aspect_button": "button[aria-label='Aspecto de proporção'], button[aria-label='Aspect ratio']",
+        "menu_option": "[role='menuitemradio']",
     },
 }
 

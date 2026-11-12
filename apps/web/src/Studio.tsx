@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import {
   Activity, AlertTriangle, Check, ChevronRight, Clapperboard, Cloud, Film, FolderOpen, Link2, LogOut, MessageSquareWarning,
-  Bell, ChevronDown, ChevronLeft, Clock, Download, Monitor, Plus, SkipForward, X, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles,
+  Bell, ChevronDown, ChevronLeft, Clock, Download, Monitor, Plus, SkipForward, X, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles, Trash2,
 } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { buildPlan, type PlanKey } from './importPlan';
@@ -107,6 +107,16 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
     }
     seenAttention.current = attention.length;
   }, [attention.length]);
+  // Exclui o projeto e, depois, os arquivos dele no Storage. Devolve a mensagem de erro, ou null se deu certo.
+  const deleteProject = useCallback(async (id: string, paths: string[]): Promise<string | null> => {
+    const { error } = await db.rpc('delete_project', { p_project_id: id });
+    if (error) { setNotice(`Não foi possível excluir: ${error.message}`); return error.message; }
+    if (paths.length) await db.storage.from(BUCKET).remove(paths);   // se falhar, só sobram arquivos órfãos; o projeto já saiu
+    setNotice('Projeto excluído.');
+    setSelectedId(null);
+    await refresh();
+    return null;
+  }, [db, refresh]);
   const download = useCallback(async (path: string, name: string) => {
     const { data, error } = await db.storage.from(BUCKET).createSignedUrl(path, 300, { download: name });
     if (error || !data) { setNotice(`Não foi possível baixar: ${error?.message ?? 'sem link'}`); return; }
@@ -151,7 +161,7 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
           {notice && <div className="notice" role="status"><Sparkles size={17} /><span>{notice}</span><button className="linkbtn" onClick={() => setNotice('')}>fechar</button></div>}
           {view === 'projects' && (
             <ProjectsView projects={projects} project={project} stages={stages} allStages={allStages} attention={attention} artifacts={artifacts} urls={urls} live={live} workerOnline={workerOnline}
-              onSelect={setSelectedId} call={call} download={download} />
+              onSelect={setSelectedId} call={call} download={download} deleteProject={deleteProject} />
           )}
           {view === 'activity' && <ActivityView events={events} projects={projects} />}
           {view === 'integrations' && <IntegrationsView heartbeat={heartbeat} workerOnline={workerOnline} />}
@@ -178,16 +188,20 @@ function projectState(project: Project, stages: Stage[]): { label: string; tone:
 
 function ProjectsView(props: {
   projects: Project[]; project: Project | null; stages: Stage[]; allStages: Stage[]; attention: Attention; artifacts: Artifact[]; urls: Record<string, string>; live: boolean; workerOnline: boolean;
-  onSelect: (id: string) => void; call: Call; download: Download;
+  onSelect: (id: string) => void; call: Call; download: Download; deleteProject: (id: string, paths: string[]) => Promise<string | null>;
 }) {
-  const { projects, project, stages, allStages, attention, artifacts, urls, live, workerOnline, onSelect, call, download } = props;
+  const { projects, project, stages, allStages, attention, artifacts, urls, live, workerOnline, onSelect, call, download, deleteProject } = props;
   const [notifyAsked, setNotifyAsked] = useState(() => !('Notification' in window) || Notification.permission !== 'default');
   const [source, setSource] = useState('');
   const [title, setTitle] = useState('');
   const [mode, setMode] = useState<'link' | 'prompts'>('link');
+  const [kind, setKind] = useState<'inspired' | 'clone'>('inspired');
   const [texts, setTexts] = useState<Record<PlanKey, string>>({ character_images: '', character_sheets: '', scene_images: '', production: '' });
   const built = useMemo(() => buildPlan(texts), [texts]);
   const [stageId, setStageId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
   const approved = stages.filter((s) => s.status === 'approved').length;
   const current = stages.find((s) => s.status !== 'approved') ?? stages[stages.length - 1] ?? null;
   const stage = stages.find((s) => s.id === stageId) ?? current;
@@ -195,11 +209,19 @@ function ProjectsView(props: {
   const heroItem = artifacts.find((a) => a.artifact_type === 'image' && a.storage_path);
   const heroUrl = heroItem?.storage_path ? urls[`${heroItem.storage_path}|${heroItem.updated_at}`] : undefined;
 
-  useEffect(() => { setStageId(null); }, [project?.id]);
+  useEffect(() => { setStageId(null); setConfirmDelete(false); setDeleteError(''); }, [project?.id]);
+
+  async function removeProject() {
+    if (!project) return;
+    setDeleting(true); setDeleteError('');
+    const error = await deleteProject(project.id, artifacts.map((a) => a.storage_path).filter((p): p is string => !!p));
+    setDeleting(false);
+    if (error) setDeleteError(error); else setConfirmDelete(false);
+  }
 
   async function create() {
     if (!source.trim()) return;
-    if (await call('create_project', { p_title: title, p_source: source }, 'Projeto criado. A análise começa assim que o worker estiver online.')) { setSource(''); setTitle(''); }
+    if (await call('create_project', { p_title: title, p_source: source, p_mode: kind }, kind === 'clone' ? 'Projeto criado (cópia fiel). A análise começa assim que o worker estiver online.' : 'Projeto criado. A análise começa assim que o worker estiver online.')) { setSource(''); setTitle(''); }
   }
 
   async function createFromPrompts() {
@@ -267,6 +289,12 @@ function ProjectsView(props: {
           <div className="createinput"><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Título (opcional)" onKeyDown={(e) => e.key === 'Enter' && create()} />
             <button onClick={create} disabled={!source.trim()}>Criar projeto <ChevronRight size={16} /></button></div>
         </div>
+        <div className="kindpick" role="radiogroup" aria-label="Como fazer o roteiro">
+          <button role="radio" aria-checked={kind === 'inspired'} className={kind === 'inspired' ? 'on' : ''} onClick={() => setKind('inspired')}>
+            <b>Inspirado</b><small>Entende a história e cria um roteiro novo, mudando algumas coisas.</small></button>
+          <button role="radio" aria-checked={kind === 'clone'} className={kind === 'clone' ? 'on' : ''} onClick={() => setKind('clone')}>
+            <b>Cópia fiel</b><small>Roteiro, cortes e câmera idênticos ao original; só troca o personagem (ex.: banana → morango).</small></button>
+        </div>
       </div>}
       {!workerOnline && <div className="notice warn"><Monitor size={17} /><span>O worker não está online: as etapas ficam na fila até você iniciá-lo no computador principal (<code>worker\start-worker.ps1</code>).</span></div>}
 
@@ -297,8 +325,14 @@ function ProjectsView(props: {
             <div className="detail">
               <div className="detailtop">
                 {heroUrl && <img className="hero" src={heroUrl} alt="" />}
-                <div className="herotext"><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{project.source_url}</small></div>
+                <div className="herotext"><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{project.mode === 'clone' ? 'Cópia fiel · ' : ''}{project.source_url}</small></div>
                 <span className={`statuspill st-${projectState(project, stages).tone}`}>{projectState(project, stages).label}</span>
+                {!confirmDelete
+                  ? <button className="ghost danger" onClick={() => setConfirmDelete(true)} title="Excluir este projeto"><Trash2 size={14} /> Excluir</button>
+                  : <span className="confirmdel"><small>Apagar “{project.title}” e todos os arquivos dele?</small>
+                      <button className="ghost danger" onClick={removeProject} disabled={deleting}><Trash2 size={14} /> {deleting ? 'Excluindo…' : 'Sim, excluir'}</button>
+                      <button className="ghost" onClick={() => setConfirmDelete(false)} disabled={deleting}>Cancelar</button></span>}
+                {deleteError && <div className="callout warn" style={{ flexBasis: '100%' }}><AlertTriangle size={15} /><span>Não foi possível excluir: {deleteError}</span></div>}
               </div>
               <div className="stats">
                 <div><small>Etapas aprovadas</small><b>{approved}<span>/{stages.length}</span></b></div>
@@ -340,7 +374,7 @@ const IMPORT_FIELDS: { key: PlanKey; label: string; agent: string; hint: string;
   { key: 'character_images', label: 'Imagens dos personagens', agent: 'ChatGPT', hint: 'Corpo inteiro de cada personagem.', placeholder: '## Anna\nFull-body character on a plain background, ...' },
   { key: 'character_sheets', label: 'Folhas 16:9 dos personagens', agent: 'ChatGPT', hint: 'Use Referências: para apontar a imagem do personagem.', placeholder: '## Folha da Anna\nReferências: Anna\n16:9 character sheet, ...' },
   { key: 'scene_images', label: 'Ambientes e cenas', agent: 'ChatGPT', hint: 'Imagem-base de cada cena; referencie personagens e ambientes pelo nome.', placeholder: '## Cozinha\nEmpty bright kitchen, ...\n\n## Cena 1\nReferências: Anna, Cozinha\nAnna at the table, ...' },
-  { key: 'production', label: 'Vídeos', agent: 'Grok', hint: 'Um clipe por prompt. Imagem inicial: nome de uma imagem acima.', placeholder: '## Clipe 1\nImagem inicial: Cena 1\nAnna says "Hallo" ...' },
+  { key: 'production', label: 'Vídeos', agent: 'Grok', hint: 'Um clipe por prompt, sempre em 720p. Imagem inicial: nome de uma imagem acima. Duração: 6, 10 ou 15 (o Python escolhe no Grok; sem isso usa o que o prompt cita, ou 6 s).', placeholder: '## Clipe 1\nImagem inicial: Cena 1\nAnna says "Hallo" ...' },
 ];
 
 const STAGE_TITLES: Record<string, string> = {
@@ -424,7 +458,7 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
         <div className="approval">
           <div>
             <b>Central de aprovação</b>
-            <small>{generation && next
+            <small>{payload.pilot ? `Este é só o clipe de teste. Aprovar autoriza o worker a gerar os outros ${payload.pilot_remaining ?? ''} clipes no Grok; se algo estiver errado, peça ajustes e só este clipe é refeito.` : generation && next
               ? `Aprovar autoriza o worker a gerar ${generation.count} ${generation.unit} no ${generation.service} (etapa “${next.title}”).`
               : next ? `Aprovar libera a etapa “${next.title}”.` : 'Aprovar conclui o projeto.'}</small>
             {asking && <textarea autoFocus value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Descreva o que deve mudar nesta etapa…" rows={3} />}
@@ -434,7 +468,7 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
               ? <><button className="ghost" onClick={() => setAsking(false)}>Cancelar</button>
                 <button disabled={busy || !comment.trim()} onClick={() => run('decide_stage', { p_stage_id: stage.id, p_decision: 'request_changes', p_comment: comment }, 'Ajustes enviados; a etapa será refeita.')}>Enviar ajustes</button></>
               : <><button className="ghost" disabled={busy} onClick={() => setAsking(true)}>Pedir ajustes</button>
-                <button disabled={busy} onClick={() => run('decide_stage', { p_stage_id: stage.id, p_decision: 'approve' }, 'Etapa aprovada.')}><Check size={16} /> {generation ? 'Aprovar e autorizar geração' : 'Aprovar etapa'}</button></>}
+                <button disabled={busy} onClick={() => run('decide_stage', { p_stage_id: stage.id, p_decision: 'approve' }, 'Etapa aprovada.')}><Check size={16} /> {payload.pilot ? 'Aprovar teste e gerar o restante' : generation ? 'Aprovar e autorizar geração' : 'Aprovar etapa'}</button></>}
           </div>
         </div>
       )}

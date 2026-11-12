@@ -59,6 +59,7 @@ class Browser:
         self._context = None
         self._proc: subprocess.Popen | None = None
         self._pages: dict[str, object] = {}
+        self._lock = asyncio.Lock()   # várias abas pedem página ao mesmo tempo; só uma abre o Chrome
 
     @property
     def is_open(self) -> bool:
@@ -87,12 +88,13 @@ class Browser:
         self._pages = {}
 
     async def page(self, name: str):
-        await self.start()
-        page = self._pages.get(name)
-        if page is None or page.is_closed():
-            page = await self._context.new_page()
-            self._pages[name] = page
-        return page
+        async with self._lock:
+            await self.start()
+            page = self._pages.get(name)
+            if page is None or page.is_closed():
+                page = await self._context.new_page()
+                self._pages[name] = page
+            return page
 
     async def close(self) -> None:
         for page in self._pages.values():

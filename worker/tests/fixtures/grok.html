@@ -7,30 +7,60 @@
 <header id="top"></header>
 <div id="feed"><video src="/old.mp4" preload="auto" muted></video></div>
 <div id="alerts"></div>
+<div id="opts">
+  <button type="button" data-k="res" aria-label="Resolução do vídeo">480p</button>
+  <button type="button" data-k="dur" aria-label="Duração do vídeo">6s</button>
+  <button type="button" data-k="asp" aria-label="Aspecto de proporção">2:3</button>
+</div>
+<div id="menu" role="menu" hidden></div>
 <form id="form" onsubmit="return false">
-  <input type="file" id="files" accept="image/*">
+  <div id="thumbs"></div>
+  <input type="file" id="files" accept="image/*" multiple>
   <textarea id="composer"></textarea>
   <button type="submit" id="go">Submit</button>
 </form>
 <pre id="log"></pre>
 <script>
 const params = new URLSearchParams(location.search);
+const OPTIONS = { res: ['480p', '720p', '1080p'], dur: ['6s', '10s', '15s'], asp: ['Automático', '2:3\nAlto', '9:16\nVertical', '16:9\nPanorâmico'] };
+const menu = document.getElementById('menu');
+document.querySelectorAll('#opts button').forEach((button) => button.addEventListener('click', () => {
+  menu.innerHTML = '';
+  for (const text of OPTIONS[button.dataset.k]) {
+    const item = document.createElement('div');
+    item.setAttribute('role', 'menuitemradio'); item.innerText = text; item.style.cursor = 'pointer';
+    item.addEventListener('click', () => { button.textContent = text.split('\n')[0]; menu.hidden = true; });
+    menu.appendChild(item);
+  }
+  menu.hidden = false;
+}));
+document.getElementById('files').addEventListener('change', (e) => {
+  for (const file of e.target.files) {
+    const img = document.createElement('img'); img.src = URL.createObjectURL(file); img.width = 40; img.height = 40;
+    document.getElementById('thumbs').appendChild(img);
+  }
+  document.querySelector('[data-k=asp]').hidden = true;   // como no Grok: com imagem inicial some o controle de proporção
+});
+const settings = () => Object.fromEntries([...document.querySelectorAll('#opts button')].map((b) => [b.dataset.k, b.textContent]));
 if (params.get('login')) document.getElementById('top').innerHTML = '<a href="/sign-in">Sign in</a>';
 document.getElementById('go').addEventListener('click', () => {
   const prompt = document.getElementById('composer').value;
   const files = [...document.getElementById('files').files].map((f) => f.name);
-  document.getElementById('log').textContent = JSON.stringify({ prompt, files });
+  document.getElementById('log').textContent = JSON.stringify({ prompt, files, settings: settings() });
   if (prompt.includes('[[limit]]')) {
     document.getElementById('alerts').innerHTML = '<div role="alert">Rate limit reached. Try again later.</div>';
     return;
   }
   if (prompt.includes('[[never]]')) return;
-  setTimeout(() => {
+  const add = (src, delay) => setTimeout(() => {
     const video = document.createElement('video');
     video.preload = 'auto'; video.muted = true;
-    video.src = '/clip.mp4';
+    video.src = src;
     document.getElementById('feed').appendChild(video);
-  }, 600);
+  }, delay);
+  if (prompt.includes('[[decoy]]')) { add('/clip.mp4', 300); add('/hd.mp4', 1500); }   // primeiro um vídeo errado (4 s, 270x480)
+  else if (prompt.includes('[[low]]')) add('/clip.mp4', 300);
+  else add(prompt.includes('[[hd]]') ? '/hd.mp4' : '/clip.mp4', 600);
 });
 </script>
 </body>

@@ -335,3 +335,16 @@ footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wr
 .eventlist .event:not(:last-child)::before { content: ''; position: absolute; left: 17px; top: 36px; bottom: -6px; width: 1px; background: var(--line); }
 .eventlist .event .dot { width: 28px; height: 28px; margin-top: 0; display: grid; place-items: center; color: var(--accent); background: var(--accent-soft); }
 .event.warn .dot { color: var(--warn); background: var(--warn-soft); } .event.error .dot { color: var(--bad); background: var(--bad-soft); }
+
+.kindpick { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.kindpick button { text-align: left; border: 1px solid var(--line-strong); background: var(--bg); border-radius: 10px; padding: 10px 12px; color: var(--text); cursor: pointer; display: grid; gap: 3px; }
+.kindpick button b { font-size: 13px; }
+.kindpick button small { font-size: 12px; color: var(--muted); line-height: 1.4; }
+.kindpick button.on { border-color: var(--accent); background: var(--accent-soft); }
+@media (max-width: 700px) { .kindpick { grid-template-columns: 1fr; } }
+
+.ghost.danger { color: var(--bad, #e5484d); border-color: color-mix(in srgb, var(--bad, #e5484d) 45%, transparent); }
+.ghost.danger:hover { background: color-mix(in srgb, var(--bad, #e5484d) 12%, transparent); }
+.confirmdel { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.confirmdel small { color: var(--muted); }
+.detailtop { flex-wrap: wrap; }
