@@ -443,6 +443,11 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
   const failedItem = stage.status === 'failed' ? payload.error?.item : undefined;
   useEffect(() => { setFixPrompt(failedItem?.prompt ?? ''); }, [failedItem?.key, failedItem?.prompt]);
   const gallery = media.filter((m) => m.artifact_type === 'image' && m.storage_path);
+  const [selecting, setSelecting] = useState(false);
+  const [notes, setNotes] = useState<Record<string, string>>({});   // item_key -> observação própria (a chave existir = item selecionado)
+  const [bulk, setBulk] = useState('');
+  const regenerable = media.filter((m) => (m.artifact_type === 'image' || m.artifact_type === 'video') && !!m.item_key);
+  const chosen = regenerable.filter((m) => (m.item_key as string) in notes);
   const generation = payload.next_generation;
 
   async function run(fn: string, args: Record<string, unknown>, ok: string) {
@@ -500,11 +505,39 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
         <details className="fold" open={reviewing || stage.status === 'in_progress' || stage.status === 'failed'}>
           <summary><span>{media.every((m) => m.artifact_type === 'video') ? 'Vídeos' : media.every((m) => m.artifact_type === 'image') ? 'Imagens' : 'Arquivos'}</span><em>{media.length}</em><ChevronDown size={16} className="chev" /></summary>
           {adjustable && stage.status === 'approved' && <p className="muted">Quer mudar algo? Use <b>Ajustar</b> em qualquer item: só ele é refeito e a etapa volta para a sua revisão. Confira depois se as etapas seguintes ainda servem.</p>}
+          {adjustable && regenerable.length > 1 && (
+            <div className="selbar">
+              {selecting
+                ? <>
+                    <span><b>{chosen.length}</b> selecionado(s)</span>
+                    <button className="ghost small" onClick={() => setNotes(Object.fromEntries(regenerable.map((m) => [m.item_key as string, notes[m.item_key as string] ?? ''])))}>Selecionar todos</button>
+                    <button className="ghost small" onClick={() => setNotes({})}>Limpar</button>
+                    <button className="ghost small" onClick={() => { setSelecting(false); setNotes({}); setBulk(''); }}>Sair da seleção</button>
+                  </>
+                : <button className="ghost small" onClick={() => setSelecting(true)}><Check size={13} /> Selecionar vários para ajustar</button>}
+            </div>
+          )}
           <div className="mediagrid">
-            {media.map((item) => <MediaCard key={item.id} item={item} stageId={stage.id} url={item.storage_path ? urls[`${item.storage_path}|${item.updated_at}`] : undefined}
-              canRegenerate={adjustable && (item.artifact_type === 'image' || item.artifact_type === 'video') && !!item.item_key} call={call} download={download}
-              onOpen={item.artifact_type === 'image' && item.storage_path ? () => setOpen(gallery.findIndex((g) => g.id === item.id)) : undefined} />)}
+            {media.map((item) => {
+              const k = item.item_key ?? '';
+              const can = adjustable && (item.artifact_type === 'image' || item.artifact_type === 'video') && !!item.item_key;
+              return <MediaCard key={item.id} item={item} stageId={stage.id} url={item.storage_path ? urls[`${item.storage_path}|${item.updated_at}`] : undefined}
+                canRegenerate={can} call={call} download={download}
+                select={selecting && can ? { on: k in notes, note: notes[k] ?? '', toggle: () => setNotes((old) => { const n = { ...old }; if (k in n) delete n[k]; else n[k] = ''; return n; }), setNote: (v) => setNotes((old) => ({ ...old, [k]: v })) } : undefined}
+                onOpen={item.artifact_type === 'image' && item.storage_path ? () => setOpen(gallery.findIndex((g) => g.id === item.id)) : undefined} />;
+            })}
           </div>
+          {selecting && chosen.length > 0 && (
+            <div className="bulkbar">
+              <textarea rows={2} value={bulk} onChange={(e) => setBulk(e.target.value)} placeholder={`O que corrigir nos ${chosen.length} itens (vale para todos; use o campo de cada imagem para algo específico)…`} />
+              <button disabled={busy} onClick={async () => {
+                setBusy(true);
+                const ok = await call('adjust_items', { p_stage_id: stage.id, p_items: chosen.map((m) => ({ key: m.item_key, comment: [bulk.trim(), notes[m.item_key as string]?.trim()].filter(Boolean).join('\n') || null })) }, `Ajuste enfileirado para ${chosen.length} itens.`);
+                setBusy(false);
+                if (ok) { setSelecting(false); setNotes({}); setBulk(''); }
+              }}><RotateCcw size={15} /> Gerar {chosen.length} de novo</button>
+            </div>
+          )}
         </details>
       )}
 
@@ -552,7 +585,9 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
   );
 }
 
-function MediaCard({ item, stageId, url, canRegenerate, call, download, onOpen }: { item: Artifact; stageId: string; url?: string; canRegenerate: boolean; call: Call; download: Download; onOpen?: () => void }) {
+type Select = { on: boolean; note: string; toggle: () => void; setNote: (v: string) => void };
+
+function MediaCard({ item, stageId, url, canRegenerate, call, download, onOpen, select }: { item: Artifact; stageId: string; url?: string; canRegenerate: boolean; call: Call; download: Download; onOpen?: () => void; select?: Select }) {
   const [asking, setAsking] = useState(false);
   const [comment, setComment] = useState('');
   const original = item.content.prompt ?? '';
@@ -560,7 +595,8 @@ function MediaCard({ item, stageId, url, canRegenerate, call, download, onOpen }
   useEffect(() => { if (!asking) setPrompt(original); }, [original, asking]);
   const size = item.content.width && item.content.height ? `${item.content.width}×${item.content.height}` : item.content.duration ? `${item.content.duration} s` : '';
   return (
-    <figure className={`mediacard ${item.artifact_type}`}>
+    <figure className={`mediacard ${item.artifact_type}${select?.on ? ' picked' : ''}`}>
+      {select && <label className="pick"><input type="checkbox" checked={select.on} onChange={select.toggle} /> {select.on ? 'Selecionado' : 'Selecionar'}</label>}
       {item.artifact_type === 'video'
         ? (url ? <video src={url} controls preload="metadata" /> : <div className="placeholder">{item.content.note ?? 'Prévia indisponível'}</div>)
         : (url ? <button type="button" className="imgbtn" onClick={onOpen} aria-label={`Ampliar ${item.name}`}><img src={url} alt={item.name} loading="lazy" /></button> : <div className="placeholder">Carregando prévia…</div>)}
@@ -569,7 +605,8 @@ function MediaCard({ item, stageId, url, canRegenerate, call, download, onOpen }
         <small>{[size, item.local_relative_path].filter(Boolean).join(' · ')}</small>
         {item.content.prompt && <details><summary>Prompt usado</summary><pre>{item.content.prompt}</pre></details>}
         {item.storage_path && <button className="ghost small" onClick={() => download(item.storage_path as string, item.name.replace(/[^\w.-]+/g, '_') + (item.artifact_type === 'video' ? '.mp4' : '.jpg'))}><Download size={13} /> Baixar prévia</button>}
-        {canRegenerate && (asking ? (
+        {select?.on && <input className="picknote" value={select.note} onChange={(e) => select.setNote(e.target.value)} placeholder="O que está errado nesta (opcional)" aria-label={`Observação para ${item.name}`} />}
+        {canRegenerate && !select && (asking ? (
           <div className="regen">
             {original && <textarea rows={5} value={prompt} onChange={(e) => setPrompt(e.target.value)} spellCheck={false} aria-label={`Prompt de ${item.name}`} />}
             <input autoFocus value={comment} onChange={(e) => setComment(e.target.value)} placeholder="O que ajustar (opcional)" />

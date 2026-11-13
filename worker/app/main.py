@@ -57,7 +57,10 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
     db.update_stage(stage["id"], status="in_progress", remove=("error", "progress"))
     try:
         if regen:
-            await stages.regen_item(ctx, inp.get("item_key", ""), inp.get("comment"))
+            if inp.get("items"):
+                await stages.regen_items(ctx, {str(i.get("item_key", "")): i.get("comment") for i in inp["items"]})
+            else:
+                await stages.regen_item(ctx, inp.get("item_key", ""), inp.get("comment"))
             db.update_stage(stage["id"], status="pending_review", remove=("progress",))
         else:
             result = await stages.run_stage(ctx)

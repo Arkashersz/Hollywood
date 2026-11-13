@@ -100,6 +100,8 @@ Em todo roteiro (exceto "Cópia fiel", que mantém os do original e só avalia c
 
 Nas etapas de imagens e vídeos, cada item tem o botão **Ajustar**, com a etapa parada, em revisão ou já aprovada. Dá para editar o prompt do item e gerar só ele de novo (a etapa volta para a sua revisão). Quando uma etapa para porque um item não pôde ser criado, o painel mostra esse item com o prompt editável e **Salvar prompt e tentar de novo** continua dali, mantendo o que já saiu. Exige a migração `0009_adjust_item.sql`.
 
+**Vários de uma vez:** em **Selecionar vários para ajustar**, marque os itens errados, escreva o que corrigir (vale para todos) e, se quiser, uma observação específica em cada um; **Gerar N de novo** refaz só eles. Exige a migração `0012_adjust_items.sql`.
+
 ## Quando uma etapa para
 
 O worker nunca digita senha, resolve CAPTCHA, contorna limite ou insiste às cegas. Ele para, explica no painel e espera você:

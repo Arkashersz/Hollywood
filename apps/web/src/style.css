@@ -199,6 +199,13 @@ footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wr
 .mediacard figcaption b { font-size: 13px; } .mediacard figcaption small { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
 .mediacard details summary { cursor: pointer; font-size: 12px; color: var(--accent); }
 .mediacard pre { white-space: pre-wrap; font-size: 11.5px; line-height: 1.55; color: var(--text-2); margin: 6px 0 0; max-height: 240px; overflow: auto; }
+.selbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 10px; font-size: 13px; }
+.mediacard.picked { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.mediacard .pick { display: flex; align-items: center; gap: 8px; padding: 9px 12px; font-size: 12.5px; font-weight: 600; cursor: pointer; border-bottom: 1px solid var(--line); }
+.picknote { min-height: 38px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--bg); color: var(--text); padding: 0 11px; font-size: 13px; }
+.bulkbar { position: sticky; bottom: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-top: 12px; padding: 12px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface-2); }
+.bulkbar textarea { flex: 1 1 260px; border: 1px solid var(--line-strong); background: var(--bg); color: var(--text); border-radius: 8px; padding: 10px; font: 13px/1.5 inherit; resize: vertical; }
+.bulkbar button { min-height: 38px; padding: 0 14px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font-weight: 600; font-size: 13px; display: inline-flex; align-items: center; gap: 7px; }
 .regen { display: flex; flex-wrap: wrap; gap: 6px; }
 .regen input { flex: 1 1 100%; min-height: 38px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--bg); padding: 0 11px; font-size: 13px; }
 .regen button, .ghost { min-height: 38px; padding: 0 13px; border-radius: 8px; border: 1px solid var(--line-strong); background: transparent; color: var(--text-2); font-weight: 600; font-size: 12.5px; display: inline-flex; align-items: center; gap: 6px; }

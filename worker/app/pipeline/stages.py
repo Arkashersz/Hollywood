@@ -218,17 +218,23 @@ async def character_bible(ctx: Ctx) -> dict:
 # ---------------------------------------------------------------------------
 # Geração item a item (imagens no ChatGPT, vídeos no Grok)
 # ---------------------------------------------------------------------------
-async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note: str | None = None) -> dict:
-    """Gera os itens pendentes, um por vez. Itens já prontos nesta versão são mantidos."""
-    if only is not None and only not in {i.key for i in items}:
-        raise Blocked("MISSING_INPUT", f"Item desconhecido nesta etapa: {only}")
+async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note: str | None = None,
+                   targets: dict[str, str | None] | None = None) -> dict:
+    """Gera os itens pendentes, um por vez. Itens já prontos nesta versão são mantidos.
+    `only` refaz um item; `targets` refaz vários, cada um com a sua observação."""
+    if only is not None:
+        targets = {only: note}
+    if targets is not None:
+        unknown = [k for k in targets if k not in {i.key for i in items}]
+        if unknown:
+            raise Blocked("MISSING_INPUT", f"Item desconhecido nesta etapa: {', '.join(unknown)}")
     kept = made = 0
     todo: list[Item] = []
     for item in items:
-        if only is not None and item.key != only:
+        if targets is not None and item.key not in targets:
             continue
         recorded = ctx.generated_version(item.key)
-        if only is None and item.key not in ctx.force and item.path.is_file() and (recorded is None or recorded >= ctx.version):
+        if targets is None and item.key not in ctx.force and item.path.is_file() and (recorded is None or recorded >= ctx.version):
             ctx.sink.file(ctx.stage_key, item.key, item.name, item.path, item.kind, _meta(item))
             kept += 1
             continue
@@ -255,7 +261,8 @@ async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note
                 await ctx.pause()
             state["last_start"] = loop.time()
             ctx.sink.progress(ctx.stage_key, finished, total, f"Gerando {item.name}…")
-            prompt = item.prompt + (f"\n\nRequested adjustment (from the user): {note}" if note else "")
+            item_note = targets.get(item.key) if targets is not None else note
+            prompt = item.prompt + (f"\n\nRequested adjustment (from the user): {item_note}" if item_note else "")
             refs = item.refs()
             if item.kind == "video":
                 info = await ctx.video.generate_video(prompt, refs, item.path, duration_s=item.duration, slot=slot)
@@ -484,7 +491,13 @@ async def run_stage(ctx: Ctx) -> dict:
 
 
 async def regen_item(ctx: Ctx, item_key: str, comment: str | None) -> dict:
+    return await regen_items(ctx, {item_key: comment})
+
+
+async def regen_items(ctx: Ctx, targets: dict[str, str | None]) -> dict:
+    """Refaz só os itens indicados, cada um com a sua observação."""
     if ctx.stage_key not in ITEM_BUILDERS:
         raise Blocked("MISSING_INPUT", "Esta etapa não tem itens regeneráveis.")
-    await generate(ctx, items_for(ctx, ctx.stage_key), only=item_key, note=comment)
-    return {"summary": f"Item regenerado: {item_key}."}
+    await generate(ctx, items_for(ctx, ctx.stage_key), targets=targets)
+    names = ", ".join(targets)
+    return {"summary": f"Item regenerado: {names}." if len(targets) == 1 else f"{len(targets)} itens regenerados: {names}."}
