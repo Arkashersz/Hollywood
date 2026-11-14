@@ -34,8 +34,9 @@ _STRIP_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDECODE")
 class ClaudeBrain:
     service = "Claude"
 
-    def __init__(self, cwd: Path, *, executable: str | None = None, runner=None):
+    def __init__(self, cwd: Path, *, executable: str | None = None, runner=None, model: str | None = None):
         self.cwd = Path(cwd)
+        self.model = (model or "").strip() or config.CLAUDE_MODEL   # o modelo do projeto vale mais que o padrão do PC
         self.executable = executable or config.CLAUDE_PATH or shutil.which("claude") or ""
         self.session_id: str | None = None
         self._run = runner or _run_cli
@@ -53,8 +54,8 @@ class ClaudeBrain:
             prompt = f"{prompt}\n\nArquivos de imagem para abrir com a ferramenta Read antes de responder (em ordem):\n{listing}"
         command = [self.executable, "-p", "--output-format", "json", "--tools", "Read", "--allowedTools", "Read",
                    "--safe-mode", "--strict-mcp-config", "--system-prompt", SYSTEM_PROMPT]
-        if config.CLAUDE_MODEL:
-            command += ["--model", config.CLAUDE_MODEL]
+        if self.model:
+            command += ["--model", self.model]
         if config.CLAUDE_EFFORT:
             command += ["--effort", config.CLAUDE_EFFORT]
         if not new_chat and self.session_id:

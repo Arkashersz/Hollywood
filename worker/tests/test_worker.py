@@ -69,7 +69,7 @@ def world(tmp_path, sample_video, monkeypatch):
         if stage not in db.stages:
             db.add_stage(stage)
         job = db.job(kind, stage, **inp)
-        asyncio.run(main.process(db, job, lambda project_dir: llm, llm, video))
+        asyncio.run(main.process(db, job, lambda project_dir, model=None: llm, llm, video))
         return db.jobs[job["id"]]
     return db, llm, video, run
 
@@ -94,7 +94,7 @@ def test_stage_success_goes_to_review_and_publishes(world):
     data, _ = db.uploads[image["storage_path"]]
     with Image.open(io.BytesIO(data)) as preview:
         assert max(preview.size) == 1600 and preview.format == "JPEG", "o painel recebe prévia leve; o original fica no PC"
-    original = config.PROJECTS_DIR / "p1" / image["local_relative_path"]
+    original = config.PROJECTS_DIR / "Teste" / image["local_relative_path"]
     with Image.open(original) as im:
         assert im.size == (2048, 3072)
 

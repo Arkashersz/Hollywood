@@ -10,6 +10,11 @@ import { AGENT_LABEL, FALLBACK_ICON, STAGE_META, STATUS_LABEL, timeAgo, type Art
 
 type View = 'projects' | 'activity' | 'integrations';
 const BUCKET = 'artifacts';
+const MODELS: { id: string; label: string }[] = [
+  { id: '', label: 'Padrão do PC do worker' }, { id: 'claude-opus-5-5', label: 'Claude Opus 5.5' }, { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' },
+  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5' }, { id: 'claude-fable-5-2', label: 'Claude Fable 5.2' },
+];
+const modelLabel = (id?: string | null) => MODELS.find((m) => m.id === (id ?? ''))?.label ?? id ?? MODELS[0].label;
 const TABLES = ['projects', 'project_stages', 'artifacts', 'jobs', 'events', 'worker_heartbeats'];
 
 export function Studio({ db, session }: { db: SupabaseClient; session: Session }) {
@@ -207,6 +212,7 @@ function ProjectsView(props: {
   const [title, setTitle] = useState('');
   const [mode, setMode] = useState<'link' | 'prompts'>('link');
   const [kind, setKind] = useState<'inspired' | 'clone'>('inspired');
+  const [model, setModel] = useState('');
   const [texts, setTexts] = useState<Record<PlanKey, string>>({ character_images: '', character_sheets: '', scene_images: '', production: '' });
   const built = useMemo(() => buildPlan(texts), [texts]);
   const [stageId, setStageId] = useState<string | null>(null);
@@ -245,12 +251,12 @@ function ProjectsView(props: {
 
   async function create() {
     if (!source.trim()) return;
-    if (await call('create_project', { p_title: title, p_source: source, p_mode: kind }, kind === 'clone' ? 'Projeto criado (cópia fiel). A análise começa assim que o worker estiver online.' : 'Projeto criado. A análise começa assim que o worker estiver online.')) { setSource(''); setTitle(''); }
+    if (await call('create_project', { p_title: title, p_source: source, p_mode: kind, p_model: model || null }, kind === 'clone' ? 'Projeto criado (cópia fiel). A análise começa assim que o worker estiver online.' : 'Projeto criado. A análise começa assim que o worker estiver online.')) { setSource(''); setTitle(''); }
   }
 
   async function createFromPrompts() {
     if (!built.total || built.problem) return;
-    if (await call('create_project_from_plan', { p_title: title, p_source: source, p_plan: built.plan },
+    if (await call('create_project_from_plan', { p_title: title, p_source: source, p_plan: built.plan, p_model: model || null },
       `Projeto criado com ${built.total} prompt(s). A geração começa assim que o worker estiver online; cada etapa para na sua aprovação.`)) {
       setTexts({ character_images: '', character_sheets: '', scene_images: '', production: '' }); setTitle(''); setSource(''); setMode('link');
     }
@@ -282,6 +288,10 @@ function ProjectsView(props: {
         <button role="tab" aria-selected={mode === 'link'} className={mode === 'link' ? 'on' : ''} onClick={() => setMode('link')}><Link2 size={15} /> A partir de um vídeo do TikTok</button>
         <button role="tab" aria-selected={mode === 'prompts'} className={mode === 'prompts' ? 'on' : ''} onClick={() => setMode('prompts')}><SkipForward size={15} /> Já tenho os prompts</button>
       </div>
+      <label className="modelpick">
+        <span><b>Modelo do Claude neste projeto</b><small>Escreve roteiro, personagens e prompts. Imagens e vídeos seguem ChatGPT e Grok.</small></span>
+        <select value={model} onChange={(e) => setModel(e.target.value)}>{MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select>
+      </label>
       {mode === 'prompts' && (
         <div className="importbox">
           <div className="importintro">
@@ -349,7 +359,10 @@ function ProjectsView(props: {
             <div className="detail">
               <div className="detailtop">
                 {heroUrl && <img className="hero" src={heroUrl} alt="" />}
-                <div className="herotext"><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{(project.part ?? 1) > 1 ? `Parte ${project.part} · ` : ''}{project.mode === 'clone' ? 'Cópia fiel · ' : ''}{project.source_url ?? (project.parent_id ? 'continuação sem vídeo de referência' : '')}</small></div>
+                <div className="herotext"><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{(project.part ?? 1) > 1 ? `Parte ${project.part} · ` : ''}{project.mode === 'clone' ? 'Cópia fiel · ' : ''}{project.source_url ?? (project.parent_id ? 'continuação sem vídeo de referência' : '')}</small>
+                  <label className="modelinline">Modelo: <select value={project.model ?? ''} onChange={(e) => call('set_project_model', { p_project_id: project.id, p_model: e.target.value || null }, `Modelo do projeto: ${modelLabel(e.target.value)} (vale a partir da próxima tarefa).`)}>
+                    {MODELS.some((m) => m.id === (project.model ?? '')) ? null : <option value={project.model ?? ''}>{modelLabel(project.model)}</option>}
+                    {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select></label></div>
                 <span className={`statuspill st-${projectState(project, stages).tone}`}>{projectState(project, stages).label}</span>
                 {!confirmDelete
                   ? <button className="ghost danger" onClick={() => setConfirmDelete(true)} title="Excluir este projeto"><Trash2 size={14} /> Excluir</button>
@@ -360,6 +373,7 @@ function ProjectsView(props: {
               </div>
               {project.status === 'completed' && (
                 <div className="sequel">
+                  <button className="ghost" onClick={() => call('open_project_folder', { p_project_id: project.id }, 'Abrindo a pasta no PC do worker…')} title="Abre a pasta com os vídeos deste projeto no computador onde o worker roda"><FolderOpen size={16} /> Abrir pasta dos vídeos</button>
                   {!sequelOpen
                     ? <button className="primary" onClick={() => setSequelOpen(true)}><Plus size={16} /> Criar parte {(project.part ?? 1) + 1}</button>
                     : (

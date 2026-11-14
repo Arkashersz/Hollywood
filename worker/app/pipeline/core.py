@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..errors import Blocked
+from ..folders import find_project_dir
 from ..media import slugify, snap_duration
 from . import prompts, render
 
@@ -175,11 +176,11 @@ def sequel_context(project: dict, projects_dir: Path) -> dict | None:
     parent_id = project.get("parent_id")
     if not parent_id:
         return None
-    mine = projects_dir / str(project["id"])
+    mine = find_project_dir(projects_dir, str(project["id"])) or projects_dir / str(project["id"])
     story_file, doc02_file, index_file = mine / "historia-anterior.md", mine / "dados" / "edicao-anterior.md", mine / "dados" / "biblioteca.json"
     part = int(project.get("part") or 2)
     if not story_file.is_file():
-        parent = projects_dir / str(parent_id)
+        parent = find_project_dir(projects_dir, str(parent_id)) or projects_dir / str(parent_id)
         script = parent / DOCS["03"][0]
         if not script.is_file():
             raise Blocked("MISSING_INPUT", f"O roteiro da parte anterior não está neste PC ({script}). A parte 2 precisa dele; "

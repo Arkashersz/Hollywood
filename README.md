@@ -132,3 +132,11 @@ Automatizar a interface desses serviços pode contrariar os termos de uso deles 
 - `python -m app.cli local <link ou .mp4>` — pipeline completo sem Supabase, com aprovação no terminal.
 
 A skill HOLYWOOD original está em `reference/holywood-original/`; a versão em `skills/holywood/` e a ponte `worker/app/claude_bridge/` são uma rota manual opcional (Claude Code operando o navegador por lotes) e não fazem parte do fluxo automático.
+
+## Pasta do projeto e "Abrir pasta"
+
+Cada projeto fica em `runtime/projects/<nome do projeto>` (o nome que você deu; dois com o mesmo nome viram "Nome" e "Nome (2)", e renomear o projeto renomeia a pasta na próxima tarefa). Os vídeos ficam em `videos/`. Pastas antigas, nomeadas pelo id, são renomeadas sozinhas. Com o projeto concluído, **Abrir pasta dos vídeos** abre essa pasta no Explorer do PC onde o worker roda. Exige a migração `0013_open_folder.sql`.
+
+## Modelo do Claude por projeto
+
+Ao criar o projeto você escolhe o modelo do Claude (roteiro, personagens, prompts); "Padrão do PC do worker" usa o `CLAUDE_MODEL` do `worker/.env`. Dá para trocar no próprio projeto (vale a partir da próxima tarefa) e a parte 2 herda o modelo da parte anterior. Imagens e vídeos continuam no ChatGPT e no Grok. Exige a migração `0014_project_model.sql`.

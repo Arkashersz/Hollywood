@@ -11,7 +11,7 @@ import sys
 import time
 import traceback
 
-from . import config
+from . import config, folders
 from .brain import ClaudeBrain
 from .browser import selectors
 from .browser.chatgpt import ChatGPT
@@ -33,13 +33,25 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
         folder = create_batch(project_id=str(job["project_id"]), service=inp["service"], purpose=inp["purpose"], items=inp["items"], approved=False)
         db.finish_job(job["id"], "succeeded", output={"batch_dir": str(folder), "status": "awaiting_user_authorization"})
         return
+    if kind == "open_folder":   # o painel só pede; quem abre a pasta é este PC
+        folder = folders.find_project_dir(config.PROJECTS_DIR, str(job["project_id"]))
+        if folder is None:
+            db.finish_job(job["id"], "failed", error_code="NO_FOLDER", error_message="A pasta deste projeto não existe neste PC.")
+            return
+        target = folder / "videos" if (folder / "videos").is_dir() else folder
+        try:
+            folders.open_in_explorer(target)
+        except Exception as exc:  # noqa: BLE001
+            db.finish_job(job["id"], "failed", error_code="OPEN_FAILED", error_message=f"Não consegui abrir {target}: {exc}")
+            return
+        db.finish_job(job["id"], "succeeded", output={"path": str(target)})
+        return
     if kind not in ("run_stage", "regen_item") or not job.get("stage_id"):
         db.finish_job(job["id"], "failed", error_code="UNKNOWN_JOB", error_message=f"Tipo de tarefa não suportado: {kind}")
         return
 
     project, stage = db.project(job["project_id"]), db.stage(job["stage_id"])
-    project_dir = config.PROJECTS_DIR / project["id"]
-    project_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = folders.resolve_project_dir(config.PROJECTS_DIR, project)
     sink = SupabaseSink(db, project, stage, project_dir)
     try:
         sequel = sequel_context(project, config.PROJECTS_DIR)
@@ -48,7 +60,7 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
         db.finish_job(job["id"], "blocked", error_code=exc.code, error_message=exc.message)
         return
     ctx = Ctx(sequel=sequel, project_id=project["id"], source=project.get("source_url") or project.get("source_video_path") or "", dir=project_dir,
-              sink=sink, brain=brain_for(project_dir), images=images, video=video, stage_key=stage["stage_key"], version=stage["current_version"],
+              sink=sink, brain=brain_for(project_dir, project.get("model")), images=images, video=video, stage_key=stage["stage_key"], version=stage["current_version"],
               feedback=inp.get("feedback"), max_clip=config.GROK_MAX_CLIP_SECONDS, whisper_model=config.WHISPER_MODEL,
               language=config.REFERENCE_LANGUAGE, plan=project.get("import_plan"), clone=project.get("mode") == "clone", image_concurrency=config.IMAGE_CONCURRENCY, video_concurrency=config.VIDEO_CONCURRENCY,
               image_slots=(pools or {}).get("image"), video_slots=(pools or {}).get("video"), pilot_approved=bool((stage.get("payload") or {}).get("pilot_approved")),
@@ -101,7 +113,7 @@ async def main() -> None:
     sel = selectors.load(config.SELECTORS_FILE)
     images, video = ChatGPT(browser, sel), Grok(browser, sel)
     # Cérebro: Claude (padrão), uma conversa por tarefa na pasta do projeto. BRAIN=chatgpt usa o ChatGPT do navegador.
-    brain_for = (lambda project_dir: images) if config.BRAIN == "chatgpt" else (lambda project_dir: ClaudeBrain(project_dir))
+    brain_for = (lambda project_dir, model=None: images) if config.BRAIN == "chatgpt" else (lambda project_dir, model=None: ClaudeBrain(project_dir, model=model))
     print(f"Cérebro: {'ChatGPT (navegador)' if config.BRAIN == 'chatgpt' else 'Claude (Claude Code local)'} · imagens: ChatGPT · vídeos: Grok", flush=True)
     parallel = 1 if config.BRAIN == "chatgpt" else config.MAX_PARALLEL_JOBS   # com o ChatGPT como cérebro, a aba de texto é a mesma das imagens
     pools = {}

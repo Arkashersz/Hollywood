@@ -265,7 +265,7 @@ def test_review_flow_sends_the_right_decisions(panel):
         ("decide_stage", {"p_stage_id": "stage-4", "p_decision": "request_changes", "p_comment": "Anna mais velha"}),
         ("decide_stage", {"p_stage_id": "stage-4", "p_decision": "approve"}),
         ("retry_stage", {"p_stage_id": "stage-5"}),
-        ("create_project", {"p_title": "Segundo", "p_source": "https://www.tiktok.com/@y/video/2", "p_mode": "clone"}),
+        ("create_project", {"p_title": "Segundo", "p_source": "https://www.tiktok.com/@y/video/2", "p_mode": "clone", "p_model": None}),
         ("delete_project", {"p_project_id": "11111111-aaaa-bbbb-cccc-000000000001"}),
     ]
 
