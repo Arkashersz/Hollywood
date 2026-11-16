@@ -336,4 +336,21 @@ const [s4] = await q(`select * from create_sequel($1, 'https://tiktok.com/x')`, 
 assert.equal(s4.mode, 'clone', 'com link a continuação herda o modo do projeto original');
 step('create_sequel: só projeto concluído e dono; com link analisa a referência, sem link resume a parte anterior');
 
+// --- história a partir de uma ideia ---------------------------------------------
+await as(A);
+const [story] = await q(`select * from create_story_project($1,$2,$3,$4)`, ['  Espelho ', ' Uma menina e um espelho ', 36, 6]);
+assert.equal(story.mode, 'story'); assert.equal(story.source_url, null);
+assert.equal(story.story_idea, 'Uma menina e um espelho'); assert.equal(story.target_seconds, 36); assert.equal(story.min_scenes, 6);
+const storyStages = await q(`select * from project_stages where project_id=$1 order by stage_order`, [story.id]);
+assert.equal(storyStages.length, 9); assert.equal(storyStages[0].title, 'Briefing da história'); assert.equal(storyStages[0].status, 'queued');
+assert.equal((await q(`select * from jobs where project_id=$1`, [story.id])).length, 1);
+await fails(`select create_story_project('x', '  ', 60, 5)`, [], /Conte a ideia/);
+await fails(`select create_story_project('x', 'ideia', 10, 5)`, [], /entre 15 e 300/);
+await fails(`select create_story_project('x', 'ideia', 60, 0)`, [], /entre 1 e 60/);
+await fails(`select create_story_project('x', 'ideia', 30, 10)`, [], /passa de 30 s/);
+await as(B);
+await fails(`select create_story_project('x', 'ideia', 60, 5)`, [], /pertence a outra conta/);
+await as(A);
+step('create_story_project grava ideia, duração e cenas mínimas, e valida os limites');
+
 console.log('Todas as verificações de SQL passaram.');

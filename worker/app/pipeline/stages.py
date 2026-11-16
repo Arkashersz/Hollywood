@@ -132,7 +132,20 @@ async def _sequel_analysis(ctx: Ctx) -> dict:
                        "para escolher uma, peça revisão dizendo qual, ou aprove para o Claude seguir a recomendada.", "warnings": []}
 
 
+async def _story_analysis(ctx: Ctx) -> dict:
+    """História criada a partir de uma ideia: o Claude escreve o briefing (premissa, personagens, beats, ganhos e finais) e o plano de edição base."""
+    story = ctx.story
+    ctx.log(f"Pedindo o briefing da história ({story['target_s']} s, no mínimo {story['min_scenes']} cenas) ao Claude…")
+    ctx.write_doc("01", await ctx.brain.ask(prompts.story_brief(story, ctx.max_clip, ctx.previous("01"), ctx.feedback), []))
+    ctx.log("Pedindo o plano de edição base ao Claude…")
+    ctx.write_doc("02", await ctx.brain.ask(prompts.story_edit(ctx.previous("02"), ctx.feedback), [], new_chat=False))
+    return {"summary": f"Briefing da sua ideia pronto: {story['target_s']} s, no mínimo {story['min_scenes']} cenas, gancho de 5 s e final aberto para a parte 2. "
+                       "Leia os três ganchos e os três finais (seções 6 e 7); para escolher, peça revisão dizendo qual, ou aprove para seguir o recomendado.", "warnings": []}
+
+
 async def analysis(ctx: Ctx) -> dict:
+    if ctx.story and not ctx.sequel:
+        return await _story_analysis(ctx)
     if ctx.sequel and not ctx.sequel.get("has_ref"):
         return await _sequel_analysis(ctx)
     ref = ctx.dir / "referencia"
@@ -180,11 +193,13 @@ async def analysis(ctx: Ctx) -> dict:
 # 2 · Roteiro
 # ---------------------------------------------------------------------------
 async def script(ctx: Ctx) -> dict:
-    prompt = prompts.doc03(ctx.read_doc("01"), ctx.read_doc("02"), ctx.max_clip, ctx.previous("03"), ctx.feedback, ctx.clone, ctx.sequel)
+    prompt = prompts.doc03(ctx.read_doc("01"), ctx.read_doc("02"), ctx.max_clip, ctx.previous("03"), ctx.feedback, ctx.clone, ctx.sequel, ctx.story)
     ctx.log("Pedindo o roteiro " + ("fiel ao original, em alemão, " if ctx.clone else "em alemão ") + "ao Claude…")
     ctx.write_doc("03", await ctx.brain.ask(prompt, []))
     if ctx.clone:
         return {"summary": "Roteiro fiel ao original escrito (mesmos cortes, cenas e câmera). Leia a seção 7: há uma proposta de troca de blocos de cena. Aprovar mantém 100% fiel; para aplicar a troca, peça revisão escrevendo “aplicar a troca”."}
+    if ctx.story:
+        return {"summary": f"Roteiro em alemão da sua história, para {ctx.story['target_s']} s e no mínimo {ctx.story['min_scenes']} cenas, com gancho de 5 s e final aberto."}
     return {"summary": "Roteiro em alemão escrito, com tradução e conta de duração."}
 
 
@@ -419,9 +434,9 @@ async def character_sheets(ctx: Ctx) -> dict:
 # ---------------------------------------------------------------------------
 async def visual_plan(ctx: Ctx) -> dict:
     bible = ctx.load_data("bible")
-    prompt = prompts.visual_plan(ctx.read_doc("03"), bible, _previous_data(ctx, "plan"), ctx.feedback, ctx.clone, ctx.sequel)
+    prompt = prompts.visual_plan(ctx.read_doc("03"), bible, _previous_data(ctx, "plan"), ctx.feedback, ctx.clone, ctx.sequel, ctx.story)
     ctx.log("Pedindo ambientes e imagens-base ao Claude…")
-    plan = await ask_json(ctx.brain, prompt, lambda raw: validate_plan(raw, bible))
+    plan = await ask_json(ctx.brain, prompt, lambda raw: validate_plan(raw, bible, int(ctx.story["min_scenes"]) if ctx.story else 0))
     reused = adopt_plan(plan, ctx.sequel)
     ctx.save_data("plan", plan)
     ctx.write_doc("07", render.doc07(bible, plan))
@@ -444,9 +459,14 @@ async def video_prompts(ctx: Ctx) -> dict:
     bible, plan = ctx.load_data("bible"), ctx.load_data("plan")
     prev09, prev10 = ctx.previous("09"), ctx.previous("10")
     catalog = render.image_catalog(bible, plan)
-    prompt = prompts.clips(ctx.read_doc("02"), ctx.read_doc("03"), bible, plan, ctx.max_clip, _previous_data(ctx, "clips"), ctx.feedback, catalog, ctx.clone)
+    prompt = prompts.clips(ctx.read_doc("02"), ctx.read_doc("03"), bible, plan, ctx.max_clip, _previous_data(ctx, "clips"), ctx.feedback, catalog, ctx.clone, ctx.story)
     ctx.log("Pedindo os prompts de vídeo ao Claude…")
-    clips = await ask_json(ctx.brain, prompt, lambda raw: validate_clips(raw, bible, plan, ctx.max_clip, set(catalog), 0 if ctx.clone else 70))
+    if ctx.story:   # duração e quantidade de cenas escolhidas pelo usuário (os clipes só têm 6, 10 ou 15 s, então há uma folga)
+        target, scenes = int(ctx.story["target_s"]), int(ctx.story["min_scenes"])
+        check = lambda raw: validate_clips(raw, bible, plan, ctx.max_clip, set(catalog), target - 4, target + 10, scenes)  # noqa: E731
+    else:
+        check = lambda raw: validate_clips(raw, bible, plan, ctx.max_clip, set(catalog), 0 if ctx.clone else 70)  # noqa: E731
+    clips = await ask_json(ctx.brain, prompt, check)
     ctx.save_data("clips", clips)
     ctx.write_doc("08", render.doc08(bible, clips, ctx.max_clip, catalog))
     ctx.log("Pedindo o plano de edição ao Claude…")
@@ -471,7 +491,11 @@ async def production(ctx: Ctx) -> dict:
                 "pilot": True, "pilot_remaining": len(items) - 1}
     stats = await generate(ctx, items, note=ctx.feedback)
     total = round(sum(media.probe(i.path)["duration"] for i in items), 1)
-    warnings = [] if (total > 70 or ctx.plan or ctx.clone) else [f"A soma real dos clipes é {total} s, abaixo da meta de 70 s. Regenere clipes mais longos ou acrescente cenas."]
+    if ctx.story:
+        target = int(ctx.story["target_s"])
+        warnings = [] if abs(total - target) <= max(8, target * 0.2) else [f"A soma real dos clipes é {total} s, longe da meta de {target} s. Regenere ou ajuste clipes antes de editar."]
+    else:
+        warnings = [] if (total > 70 or ctx.plan or ctx.clone) else [f"A soma real dos clipes é {total} s, abaixo da meta de 70 s. Regenere clipes mais longos ou acrescente cenas."]
     return {"summary": f"{len(items)} clipe(s), {total} s no total ({stats['made']} gerado(s) agora). Próximo passo: editar no CapCut conforme o Documento 09.",
             "warnings": warnings}
 

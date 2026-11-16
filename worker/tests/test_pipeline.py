@@ -645,3 +645,70 @@ def test_clone_keeps_the_original_hook_and_ending_but_asks_for_an_evaluation(pro
     run(ctx, "analysis"); run(ctx, "script")
     script = next(a["prompt"] for a in llm.asks if "ROTEIRISTA do REMAKE FIEL" in a["prompt"])
     assert "Avaliação do gancho e do final" in script and "TRÊS ganchos alternativos" not in script
+
+
+# ---------------------------------------------------------------------------
+# História criada a partir de uma ideia (sem link)
+# ---------------------------------------------------------------------------
+STORY = {"idea": "Uma menina descobre que o espelho do avô mostra o futuro.", "target_s": 36, "min_scenes": 6}
+
+
+def _story_ctx(project, **story):
+    ctx, llm, video, sink = project
+    ctx.story = {**STORY, **story}
+    ctx.source = ""
+    orig = llm.ask
+
+    async def ask(prompt, files=None, *, new_chat=True):
+        if prompt.startswith("Agora escreva o Documento 02 · Plano de edição base"):
+            llm.asks.append({"prompt": prompt, "files": [], "new_chat": new_chat})
+            return "## 1. Ritmo\n\nRápido."
+        return await orig(prompt, files, new_chat=new_chat)
+    llm.ask = ask
+    return ctx, llm, video, sink
+
+
+def test_story_idea_reaches_briefing_script_plan_and_clips_with_duration_scenes_and_5s_hook(project):
+    ctx, llm, _, _ = _story_ctx(project)
+    scenes = {"environments": PLAN["environments"], "areas": PLAN["areas"],
+              "scenes": [{"id": f"{i:02d}", "environment": "Küche", "characters": ["Anna"], "composition": "Medium shot."} for i in range(1, 7)]}
+    llm.json_script = {"você é o DESIGNER": [as_json(scenes)]}
+    run(ctx, "analysis")
+    assert not (ctx.dir / "referencia").exists()   # nada de análise de vídeo
+    brief = next(a["prompt"] for a in llm.asks if "TAREFA: você é o ANALISTA" in a["prompt"])
+    assert "espelho do avô" in brief and "36 segundos" in brief and "MÍNIMA de cenas: 6" in brief and "GANCHO DE 5 SEGUNDOS" in brief and "FINAL (últimos 3–5 s)" in brief
+    run(ctx, "script")
+    script = next(a["prompt"] for a in llm.asks if "TAREFA: você é o ROTEIRISTA" in a["prompt"])
+    for marker in ("espelho do avô", "36 segundos", "MÍNIMA de cenas: 6", "GANCHO DE 5 SEGUNDOS", "TRÊS finais alternativos", "No mínimo 6 cenas", "documento-01-briefing-da-historia"):
+        assert marker in script, marker
+    assert "inspirado em um vídeo de referência" not in script
+    run(ctx, "character_bible")
+    run(ctx, "visual_plan")
+    assert "pelo menos 6 entradas" in next(a["prompt"] for a in llm.asks if "você é o DESIGNER" in a["prompt"])
+
+
+def test_story_requires_the_minimum_scenes_and_the_target_duration():
+    bible = core.validate_bible(BIBLE)
+    with pytest.raises(ValueError, match="no mínimo 6"):
+        core.validate_plan(PLAN, bible, min_scenes=6)
+    assert core.validate_plan(PLAN, bible, min_scenes=2)["scenes"]
+    plan = core.validate_plan(PLAN, bible)
+    cat = {"cena-01", "cena-02", "folha-anna"}
+    ok = core.validate_clips(clips_payload(6, 6), bible, plan, 6, cat, 32, 46, 6)   # 36 s, 6 clipes
+    assert ok["total_s"] == 36
+    with pytest.raises(ValueError, match="no máximo 46"):
+        core.validate_clips(clips_payload(12, 6), bible, plan, 6, cat, 32, 46, 6)
+    with pytest.raises(ValueError, match="acima de 32"):
+        core.validate_clips(clips_payload(4, 6), bible, plan, 6, cat, 32, 46, 4)
+    with pytest.raises(ValueError, match="pelo menos 8 clipes"):
+        core.validate_clips(clips_payload(6, 6), bible, plan, 6, cat, 32, 46, 8)
+
+
+def test_story_clip_stage_asks_for_the_chosen_duration_and_blocks_a_plan_that_misses_it(project):
+    ctx, llm, _, _ = _story_ctx(project, target_s=36, min_scenes=2)
+    run(ctx, "analysis"); run(ctx, "script"); run(ctx, "character_bible"); run(ctx, "visual_plan")
+    llm.json_script = {"você é o EDITOR": [as_json(clips_payload(12, 6)), as_json(clips_payload(12, 6))]}   # 72 s: passa de 36 s
+    with pytest.raises(Blocked, match="Resposta fora do formato"):
+        run(ctx, "video_prompts")
+    prompt = next(a["prompt"] for a in llm.asks if "você é o EDITOR" in a["prompt"])
+    assert "entre 36 e 42 segundos" in prompt and "GANCHO DE 5 SEGUNDOS" in prompt

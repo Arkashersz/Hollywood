@@ -140,3 +140,7 @@ Cada projeto fica em `runtime/projects/<nome do projeto>` (o nome que você deu;
 ## Modelo do Claude por projeto
 
 Ao criar o projeto você escolhe o modelo do Claude (roteiro, personagens, prompts); "Padrão do PC do worker" usa o `CLAUDE_MODEL` do `worker/.env`. Dá para trocar no próprio projeto (vale a partir da próxima tarefa) e a parte 2 herda o modelo da parte anterior. Imagens e vídeos continuam no ChatGPT e no Grok. Exige a migração `0014_project_model.sql`.
+
+## Criar a partir de uma ideia de história
+
+Na aba **Tenho uma ideia de história** você escreve a ideia (pode ser uma frase), define a **duração do vídeo** e a **quantidade mínima de cenas**. Não há link: o Claude escreve o briefing, o roteiro em alemão, os personagens, as cenas e os prompts, no mesmo padrão dos outros projetos (gancho de 5 s impactantes no início, final com cliffhanger e convite para a parte 2, consistência de personagens). O worker confere o resultado: o plano de cenas precisa ter no mínimo as cenas pedidas e a soma dos clipes precisa ficar entre a duração pedida e +6 s (os clipes do Grok só têm 6, 10 ou 15 s); se não fechar, o Claude é chamado de novo. Exige a migração `0015_story_idea.sql`.

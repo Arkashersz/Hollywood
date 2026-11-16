@@ -376,3 +376,10 @@ footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wr
 .modelpick select, .modelinline select { min-height: 36px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--bg); color: var(--text); padding: 0 10px; font-size: 13px; }
 .modelinline { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-top: 4px; }
 .modelinline select { min-height: 28px; font-size: 12px; }
+.storynums { display: flex; gap: 14px; flex-wrap: wrap; align-items: end; }
+.storynums label { display: grid; gap: 6px; font-size: 13px; }
+.storynums input { min-height: 44px; width: 150px; border: 1px solid var(--line-strong); background: var(--bg); border-radius: 10px; padding: 0 12px; font-size: 14px; }
+.storynums input:focus { outline: 0; border-color: var(--accent); }
+.storynums small { flex: 1 1 240px; color: var(--muted); }
+.storyfoot { grid-template-columns: 1fr auto; }
+@media (max-width: 720px) { .storyfoot { grid-template-columns: 1fr; } }

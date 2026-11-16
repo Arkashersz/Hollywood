@@ -76,6 +76,29 @@ ENDING_RULES = """FINAL (últimos 3–5 s) — o outro coração do vídeo; obri
 CONSISTENCY_RULES = """CONSISTÊNCIA (zero erro): cada personagem e cada ambiente é idêntico em todas as imagens e vídeos. Tudo que o personagem veste ou carrega (óculos, boné, colar, cicatriz, cores exatas) faz parte da descrição fixa e aparece em TODA cena, a menos que a história mostre explicitamente que ele perdeu ou trocou o item (e então o roteiro diz em qual cena e a partir de quando)."""
 
 
+STORY_HOOK_5S = """GANCHO DE 5 SEGUNDOS (esta regra SUBSTITUI "0–3 s" nas regras de gancho): os 5 primeiros segundos do vídeo precisam ser impactantes do primeiro ao último frame.
+- Abra NO MEIO da ação, no auge de um perigo, segredo, conflito ou consequência; nada de apresentação, cumprimento, paisagem, título ou fade-in.
+- Segundo 0–1: algo impossível, perigoso ou intrigante já está na tela. Segundos 1–5: a tensão sobe, sem respiro, e termina em uma pergunta que só o resto do vídeo responde.
+- Texto na tela (DE) nos primeiros 1–2 s e primeira fala com no máximo 6 palavras."""
+
+STORY_BASE_FROM = " inspirado em um vídeo de referência (inspiração, nunca cópia)"
+STORY_BASE_TO = " a partir de uma IDEIA DE HISTÓRIA do usuário (não há vídeo de referência)"
+
+
+def story_base() -> str:
+    return BASE.replace(STORY_BASE_FROM, STORY_BASE_TO)
+
+
+def story_rules(story: dict, max_clip: int) -> str:
+    """Regras de duração e de cenas escolhidas pelo usuário ao criar a história."""
+    target, scenes = int(story["target_s"]), int(story["min_scenes"])
+    options = ", ".join(str(o) for o in (6, 10, 15) if o <= max_clip)
+    return f"""DURAÇÃO E CENAS (definidas pelo usuário, obrigatórias):
+- Duração total do vídeo: {target} segundos (aceitável entre {target} e {target + 6} s; nunca abaixo de {target - 3} s). Mostre a conta.
+- Quantidade MÍNIMA de cenas: {scenes}. Pode haver mais, nunca menos. Cada cena vira um ou mais clipes de {options} s (máximo {max_clip} s por clipe); a soma dos clipes precisa fechar a duração total.
+- Distribua o tempo pelos beats: gancho de 5 s, desenvolvimento em escalada e final de 3–5 s."""
+
+
 def sequel_environments(sequel: dict | None) -> str:
     envs = (sequel or {}).get("environments") or []
     if not envs:
@@ -226,7 +249,86 @@ Seções:
 {MD_OUT}"""
 
 
-def doc03(doc01_md: str, doc02_md: str, max_clip: int, previous: str | None, feedback: str | None, clone: bool = False, sequel: dict | None = None) -> str:
+def story_brief(story: dict, max_clip: int, previous: str | None, feedback: str | None) -> str:
+    return f"""{story_base()}
+
+TAREFA: você é o ANALISTA. O usuário deu a ideia de uma história; transforme-a em um briefing para o roteirista. Não escreva o roteiro.
+
+{data('ideia-do-usuario', story['idea'])}
+
+{story_rules(story, max_clip)}
+
+{STORY_HOOK_5S}
+
+{ENDING_RULES}
+
+Escreva o Documento 01 · Briefing da história com estas seções:
+## 1. Resumo — a ideia em 3 linhas, no que ela tem de mais forte; o que é do usuário e o que você está inferindo.
+## 2. Premissa, tema e emoção — logline (DE e PT), tom, emoção principal e público.
+## 3. Personagens — quem são, o que querem, o que os separa (poucos e marcantes; ótimo para vídeo curto).
+## 4. Mundo e locais — onde acontece, em quantos locais diferentes (relacione com a quantidade mínima de cenas).
+## 5. Estrutura em beats — tabela com tempo estimado: gancho (0–5 s) → conflito → escalada → clímax parcial → final aberto, somando a duração pedida.
+## 6. Três ganchos possíveis para os 5 primeiros segundos — descrição, texto na tela, por que prende, nota de 1 a 10 (só vale nota 8 ou mais) e qual você recomenda.
+## 7. Três finais possíveis com brecha para a parte 2 — o cliffhanger de cada um, nota de 1 a 10 e qual você recomenda.
+## 8. Plano de cenas — lista numerada com no mínimo {story['min_scenes']} cenas: local, o que acontece e duração aproximada.
+## 9. Dúvidas ao usuário e riscos (conteúdo, direitos, consistência).
+{revision(previous, feedback)}
+{MD_OUT}"""
+
+
+def story_edit(previous: str | None, feedback: str | None) -> str:
+    return f"""Agora escreva o Documento 02 · Plano de edição base para esta história (não existe vídeo de referência; é a direção de edição que você recomenda), pensando em TikTok vertical 9:16.
+
+Seções:
+## 1. Ritmo — duração média dos planos, onde acelerar e onde respirar; quantos cortes nos primeiros 5 s.
+## 2. Gancho de 5 s na edição — como montar (corte no impacto, texto nos 1–2 s, som de impacto, nenhum respiro).
+## 3. Transições e câmera — o que usar e o que evitar.
+## 4. Texto na tela — idioma (alemão), estilo, posição fora das áreas cobertas pela interface do TikTok, animação.
+## 5. Áudio e mixagem — voz sempre acima da música, estilo e andamento da música, efeitos sonoros.
+## 6. Final — como segurar o suspense e convidar para a parte 2 (texto, corte seco no auge, sem música de encerramento).
+## 7. Resumo para o editor — as 5 decisões que mais definem o jeito do vídeo.
+{revision(previous, feedback)}
+{MD_OUT}"""
+
+
+def doc03_story(doc01_md: str, doc02_md: str, max_clip: int, previous: str | None, feedback: str | None, story: dict, sequel: dict | None = None) -> str:
+    return f"""{story_base()}
+
+TAREFA: você é o ROTEIRISTA. Escreva o melhor roteiro em alemão para a história do usuário, seguindo o briefing.
+
+{data('ideia-do-usuario', story['idea'])}
+
+{data('documento-01-briefing-da-historia', doc01_md)}
+
+{data('documento-02-plano-de-edicao', doc02_md)}
+
+{story_rules(story, max_clip)}
+- Conta: palavras faladas em alemão por cena ÷ 2,5 palavras por segundo + pausas + tempos sem fala.
+
+Alemão: natural, de falante nativo, "du" como padrão; frases curtas, boas para voz de IA; números por extenso; sem siglas. Texto na tela em alemão, curto. Conteúdo adequado às regras do TikTok.
+
+{STORY_HOOK_5S}
+
+{HOOK_RULES}
+
+{ENDING_RULES}
+
+{CONSISTENCY_RULES}
+
+Escreva o Documento 03 · Roteiro com estas seções:
+## 1. Cabeçalho — título de trabalho, logline (DE e PT), tom, tipo de áudio, personagens (nome, papel e uma linha cada).
+## 2. Tabela de cenas — Cena · Início–Fim · Duração · Visual (PT) · Fala ou narração (DE) · Tradução (PT) · Texto na tela (DE) · Ritmo e áudio. No mínimo {story['min_scenes']} cenas; a primeira cobre os 5 s do gancho.
+## 3. Conta da duração — total e número de cenas.
+## 4. Texto corrido — em alemão e a tradução em português.
+## 5. Gancho e final — os três ganchos (de 5 s) e os três finais com nota e a escolha; o que acontece nos 5 primeiros segundos, segundo a segundo; o final dos últimos 5 s; a pergunta para os comentários; e o que a parte 2 promete.
+## 6. Dúvidas ao usuário.
+{sequel_block(sequel)}{revision(previous, feedback)}
+{MD_OUT}"""
+
+
+def doc03(doc01_md: str, doc02_md: str, max_clip: int, previous: str | None, feedback: str | None, clone: bool = False, sequel: dict | None = None, story: dict | None = None) -> str:
+    if story:
+        return doc03_story(doc01_md, doc02_md, max_clip, previous, feedback, story, sequel)
     if clone:
         return CLONE_BASE + "\n\n" + CLONE_SCRIPT.format(
             doc01=data('documento-01-ficha-da-referencia', doc01_md), doc02=data('documento-02-edicao-da-referencia', doc02_md),
@@ -309,8 +411,9 @@ Inclua todos os personagens que aparecem no roteiro, inclusive um narrador sem c
 {JSON_OUT}"""
 
 
-def visual_plan(doc03_md: str, bible: dict, previous: str | None, feedback: str | None, clone: bool = False, sequel: dict | None = None) -> str:
+def visual_plan(doc03_md: str, bible: dict, previous: str | None, feedback: str | None, clone: bool = False, sequel: dict | None = None, story: dict | None = None) -> str:
     names = [c["name"] for c in bible["characters"]]
+    min_scenes = f"\nQUANTIDADE MÍNIMA DE CENAS (definida pelo usuário): \"scenes\" precisa ter pelo menos {story['min_scenes']} entradas.\n" if story else ""
     return f"""{CLONE_BASE if clone else BASE}
 
 TAREFA: você é o DESIGNER. Planeje os ambientes e a imagem inicial de cada cena do roteiro aprovado.
@@ -346,12 +449,12 @@ Devolva este objeto:
 }}
 
 Uma entrada em "scenes" para cada cena (ou clipe encadeado que precise de imagem própria) do roteiro, na ordem. Ambientes recorrentes aparecem uma única vez em "environments". {CONSISTENCY_RULES}
-{sequel_environments(sequel)}{CLONE_RULES + chr(10) + "- Uma cena por plano do original, com a mesma composição inicial do quadro original (ângulo, distância, posição e direção do olhar), só com o personagem trocado; o campo shot_pt copia a câmera do roteiro. Os ambientes seguem o roteiro aprovado (troca de blocos só se estiver aplicada nele)." if clone else ""}
+{min_scenes}{sequel_environments(sequel)}{CLONE_RULES + chr(10) + "- Uma cena por plano do original, com a mesma composição inicial do quadro original (ângulo, distância, posição e direção do olhar), só com o personagem trocado; o campo shot_pt copia a câmera do roteiro. Os ambientes seguem o roteiro aprovado (troca de blocos só se estiver aplicada nele)." if clone else ""}
 {revision(previous, feedback)}
 {JSON_OUT}"""
 
 
-def clips(doc02_md: str, doc03_md: str, bible: dict, plan: dict, max_clip: int, previous: str | None, feedback: str | None, catalog: dict | None = None, clone: bool = False) -> str:
+def clips(doc02_md: str, doc03_md: str, bible: dict, plan: dict, max_clip: int, previous: str | None, feedback: str | None, catalog: dict | None = None, clone: bool = False, story: dict | None = None) -> str:
     names = [c["name"] for c in bible["characters"]]
     scenes = [{"id": s["id"], "environment": s["environment"], "characters": s["characters"], "shot": s.get("shot_pt", "")} for s in plan["scenes"]]
     return f"""{CLONE_BASE if clone else BASE}
@@ -385,8 +488,8 @@ Devolva este objeto:
  ]
 }}
 
-Regras: um ou mais clipes por cena, na ordem da edição; cada "duration_s" é UM destes valores: {', '.join(str(o) for o in (6, 10, 15) if o <= max_clip)} (o Grok só gera essas durações; escolha a menor que comporta as falas e a ação do clipe); {"a soma das durações deve bater com a duração do roteiro (que copia a do original); copie no prompt de cada clipe o movimento de câmera exato descrito na coluna Câmera do roteiro." if clone else "a soma das durações deve ficar ACIMA de 70 segundos e bater com o roteiro."} Cada clipe precisa dizer a duração e quais imagens anexar; escolha para cada clipe só as imagens que ele realmente usa. Não invente nomes de botões ou recursos do Grok.
-{"" if clone else HOOK_CLIP}
+Regras: um ou mais clipes por cena, na ordem da edição; cada "duration_s" é UM destes valores: {', '.join(str(o) for o in (6, 10, 15) if o <= max_clip)} (o Grok só gera essas durações; escolha a menor que comporta as falas e a ação do clipe); {"a soma das durações deve bater com a duração do roteiro (que copia a do original); copie no prompt de cada clipe o movimento de câmera exato descrito na coluna Câmera do roteiro." if clone else (f"a soma das durações deve ficar entre {story['target_s']} e {story['target_s'] + 6} segundos (duração pedida pelo usuário: {story['target_s']} s), com pelo menos {story['min_scenes']} clipes, e bater com o roteiro." if story else "a soma das durações deve ficar ACIMA de 70 segundos e bater com o roteiro.")} Cada clipe precisa dizer a duração e quais imagens anexar; escolha para cada clipe só as imagens que ele realmente usa. Não invente nomes de botões ou recursos do Grok.
+{"" if clone else HOOK_CLIP}{chr(10) + HOOK_CLIP_STORY if story else ""}
 {revision(previous, feedback)}
 {JSON_OUT}"""
 
@@ -395,6 +498,9 @@ HOOK_CLIP = """GANCHO E FINAL NOS CLIPES (obrigatório):
 - Clipe 1: o prompt começa já no meio da ação de choque; a primeira ação visível acontece em até 1 s e o impacto máximo cai antes dos 3 s. Sem fade-in, sem plano de apresentação, sem câmera parada esperando. Se houver fala, a primeira frase é curta (até 6 palavras).
 - Último clipe: os últimos 3–5 s seguram o cliffhanger (revelação parcial, ameaça, olhar para algo que o público ainda não vê); a última fala deixa a pergunta no ar e a imagem final não resolve o conflito. Nada de despedida nem agradecimento.
 - Em todos os clipes: personagens e objetos exatamente como nas imagens anexadas (mesmo rosto, roupa, cores e acessórios); nenhum item aparece ou some sem a ação mostrar isso."""
+
+
+HOOK_CLIP_STORY = """GANCHO DE 5 SEGUNDOS (substitui "antes dos 3 s" acima): o impacto máximo do clipe 1 cai antes dos 5 s e não há um único segundo de respiro entre 0 e 5 s."""
 
 
 def doc09(previous: str | None, feedback: str | None) -> str:

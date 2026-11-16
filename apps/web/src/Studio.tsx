@@ -210,7 +210,10 @@ function ProjectsView(props: {
   const [notifyAsked, setNotifyAsked] = useState(() => !('Notification' in window) || Notification.permission !== 'default');
   const [source, setSource] = useState('');
   const [title, setTitle] = useState('');
-  const [mode, setMode] = useState<'link' | 'prompts'>('link');
+  const [mode, setMode] = useState<'link' | 'story' | 'prompts'>('link');
+  const [idea, setIdea] = useState('');
+  const [seconds, setSeconds] = useState(60);
+  const [minScenes, setMinScenes] = useState(8);
   const [kind, setKind] = useState<'inspired' | 'clone'>('inspired');
   const [model, setModel] = useState('');
   const [texts, setTexts] = useState<Record<PlanKey, string>>({ character_images: '', character_sheets: '', scene_images: '', production: '' });
@@ -254,6 +257,15 @@ function ProjectsView(props: {
     if (await call('create_project', { p_title: title, p_source: source, p_mode: kind, p_model: model || null }, kind === 'clone' ? 'Projeto criado (cópia fiel). A análise começa assim que o worker estiver online.' : 'Projeto criado. A análise começa assim que o worker estiver online.')) { setSource(''); setTitle(''); }
   }
 
+  const storyProblem = !idea.trim() ? '' : seconds < 15 || seconds > 300 ? 'A duração precisa ficar entre 15 e 300 segundos.'
+    : minScenes < 1 || minScenes > 60 ? 'A quantidade mínima de cenas precisa ficar entre 1 e 60.'
+    : minScenes * 6 > seconds + 10 ? `${minScenes} cenas de no mínimo 6 s passam de ${seconds} s. Aumente a duração ou reduza as cenas.` : '';
+  async function createStory() {
+    if (!idea.trim() || storyProblem) return;
+    if (await call('create_story_project', { p_title: title, p_idea: idea, p_seconds: seconds, p_min_scenes: minScenes, p_model: model || null },
+      'História criada. O briefing começa assim que o worker estiver online; cada etapa para na sua aprovação.')) { setIdea(''); setTitle(''); }
+  }
+
   async function createFromPrompts() {
     if (!built.total || built.problem) return;
     if (await call('create_project_from_plan', { p_title: title, p_source: source, p_plan: built.plan, p_model: model || null },
@@ -286,6 +298,7 @@ function ProjectsView(props: {
       )}
       <div className="modetabs" role="tablist" aria-label="Como começar">
         <button role="tab" aria-selected={mode === 'link'} className={mode === 'link' ? 'on' : ''} onClick={() => setMode('link')}><Link2 size={15} /> A partir de um vídeo do TikTok</button>
+        <button role="tab" aria-selected={mode === 'story'} className={mode === 'story' ? 'on' : ''} onClick={() => setMode('story')}><Sparkles size={15} /> Tenho uma ideia de história</button>
         <button role="tab" aria-selected={mode === 'prompts'} className={mode === 'prompts' ? 'on' : ''} onClick={() => setMode('prompts')}><SkipForward size={15} /> Já tenho os prompts</button>
       </div>
       <label className="modelpick">
@@ -315,6 +328,28 @@ function ProjectsView(props: {
           {built.problem && <div className="callout warn"><AlertTriangle size={15} /><span>{built.problem}</span></div>}
         </div>
       )}
+      {mode === 'story' && (
+        <div className="importbox storybox">
+          <div className="importintro">
+            <b>Conte a ideia; o Claude escreve o roteiro</b>
+            <small>O roteiro sai em alemão, com gancho de 5 s impactantes no início e final aberto para a parte 2 (o mesmo padrão dos outros projetos). Você define a duração do vídeo e quantas cenas, no mínimo, ele terá.</small>
+          </div>
+          <label className="importfield">
+            <span><b>Ideia da história</b><small>Quanto mais detalhe (personagens, local, conflito, tom), mais fiel o roteiro. Pode ser só uma frase.</small></span>
+            <textarea rows={6} value={idea} onChange={(e) => setIdea(e.target.value)} maxLength={6000} placeholder="Ex.: Uma menina descobre que o espelho do avô mostra o que vai acontecer daqui a uma hora. Hoje ele mostra ela mesma desaparecendo." />
+          </label>
+          <div className="storynums">
+            <label><b>Duração do vídeo (s)</b><input type="number" min={15} max={300} step={5} value={seconds} onChange={(e) => setSeconds(Number(e.target.value))} /></label>
+            <label><b>Mínimo de cenas</b><input type="number" min={1} max={60} value={minScenes} onChange={(e) => setMinScenes(Number(e.target.value))} /></label>
+            <small>Cada cena vira um clipe de 6, 10 ou 15 s no Grok, então a soma pode variar uns segundos para cima.</small>
+          </div>
+          <div className="importfoot storyfoot">
+            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Título (opcional)" />
+            <button className="primary" disabled={!idea.trim() || !!storyProblem} onClick={createStory}>Criar história <ChevronRight size={16} /></button>
+          </div>
+          {storyProblem && <div className="callout warn"><AlertTriangle size={15} /><span>{storyProblem}</span></div>}
+        </div>
+      )}
       {mode === 'link' && <div className="create">
         <div className="createicon"><Plus size={20} /></div>
         <div className="createcopy"><b>Começar uma nova produção</b><small>Link do TikTok ou caminho de um .mp4 no PC do worker.</small></div>
@@ -333,7 +368,7 @@ function ProjectsView(props: {
       {!workerOnline && <div className="notice warn"><Monitor size={17} /><span>O worker não está online: as etapas ficam na fila até você iniciá-lo no computador principal (<code>worker\start-worker.ps1</code>).</span></div>}
 
       <div className="sectionhead"><div><h2>Produções</h2><small>{projects.length} projeto(s)</small></div></div>
-      {projects.length === 0 ? <div className="empty">Nenhum projeto ainda. Cole um link acima para começar.</div> : (
+      {projects.length === 0 ? <div className="empty">Nenhum projeto ainda. Cole um link ou conte uma ideia acima para começar.</div> : (
         <div className="projectlayout">
           <div className="projectlist">
             {projects.map((p) => {
@@ -359,7 +394,7 @@ function ProjectsView(props: {
             <div className="detail">
               <div className="detailtop">
                 {heroUrl && <img className="hero" src={heroUrl} alt="" />}
-                <div className="herotext"><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{(project.part ?? 1) > 1 ? `Parte ${project.part} · ` : ''}{project.mode === 'clone' ? 'Cópia fiel · ' : ''}{project.source_url ?? (project.parent_id ? 'continuação sem vídeo de referência' : '')}</small>
+                <div className="herotext"><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{(project.part ?? 1) > 1 ? `Parte ${project.part} · ` : ''}{project.mode === 'clone' ? 'Cópia fiel · ' : ''}{project.mode === 'story' ? `Ideia própria · ${project.target_seconds ?? '?'} s · mín. ${project.min_scenes ?? '?'} cenas` : (project.source_url ?? (project.parent_id ? 'continuação sem vídeo de referência' : ''))}</small>
                   <label className="modelinline">Modelo: <select value={project.model ?? ''} onChange={(e) => call('set_project_model', { p_project_id: project.id, p_model: e.target.value || null }, `Modelo do projeto: ${modelLabel(e.target.value)} (vale a partir da próxima tarefa).`)}>
                     {MODELS.some((m) => m.id === (project.model ?? '')) ? null : <option value={project.model ?? ''}>{modelLabel(project.model)}</option>}
                     {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select></label></div>

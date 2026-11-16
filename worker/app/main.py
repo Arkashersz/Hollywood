@@ -26,6 +26,13 @@ from .pipeline.core import Ctx, sequel_context
 HOST = socket.gethostname()
 
 
+def story_of(project: dict) -> dict | None:
+    """Projeto criado a partir de uma ideia de história: a ideia, a duração total e a quantidade mínima de cenas."""
+    if project.get("mode") != "story":
+        return None
+    return {"idea": project.get("story_idea") or "", "target_s": int(project.get("target_seconds") or 60), "min_scenes": int(project.get("min_scenes") or 1)}
+
+
 async def process(db: Db, job: dict, brain_for, images, video, pools: dict | None = None) -> None:
     """Executa uma tarefa e grava o desfecho. Nunca aprova nada: a etapa termina em revisão."""
     kind, inp = job.get("job_type"), job.get("input") or {}
@@ -62,7 +69,7 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
     ctx = Ctx(sequel=sequel, project_id=project["id"], source=project.get("source_url") or project.get("source_video_path") or "", dir=project_dir,
               sink=sink, brain=brain_for(project_dir, project.get("model")), images=images, video=video, stage_key=stage["stage_key"], version=stage["current_version"],
               feedback=inp.get("feedback"), max_clip=config.GROK_MAX_CLIP_SECONDS, whisper_model=config.WHISPER_MODEL,
-              language=config.REFERENCE_LANGUAGE, plan=project.get("import_plan"), clone=project.get("mode") == "clone", image_concurrency=config.IMAGE_CONCURRENCY, video_concurrency=config.VIDEO_CONCURRENCY,
+              language=config.REFERENCE_LANGUAGE, plan=project.get("import_plan"), clone=project.get("mode") == "clone", story=story_of(project), image_concurrency=config.IMAGE_CONCURRENCY, video_concurrency=config.VIDEO_CONCURRENCY,
               image_slots=(pools or {}).get("image"), video_slots=(pools or {}).get("video"), pilot_approved=bool((stage.get("payload") or {}).get("pilot_approved")),
               overrides=dict((stage.get("payload") or {}).get("prompt_overrides") or {}), force=set(inp.get("force_items") or []), pause=lambda: asyncio.sleep(config.PAUSE_BETWEEN_ITEMS))
     regen = kind == "regen_item"

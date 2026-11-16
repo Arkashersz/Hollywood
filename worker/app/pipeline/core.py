@@ -77,6 +77,7 @@ class Ctx:
     force: set = field(default_factory=set)          # itens a refazer mesmo já prontos (ajuste pedido numa etapa parada)
     sequel: dict | None = None      # continuação (parte 2+): {part, notes, story, characters, has_ref, doc02}
     clone: bool = False             # modo cópia fiel: roteiro, cortes e câmera idênticos ao original
+    story: dict | None = None       # história criada a partir de uma ideia: {idea, target_s, min_scenes}
     plan: dict | None = None        # prompts trazidos prontos pelo usuário (projeto iniciado numa etapa avançada)
     _generated: dict = field(default_factory=dict)
 
@@ -342,13 +343,15 @@ def validate_bible(raw: dict) -> dict:
     return {"style_block": style, "style_explanation_pt": _text(raw, "style_explanation_pt", "raiz", required=False), "characters": out}
 
 
-def validate_plan(raw: dict, bible: dict) -> dict:
+def validate_plan(raw: dict, bible: dict, min_scenes: int = 0) -> dict:
     names = {c["name"].casefold(): c for c in bible["characters"]}
     envs_raw, scenes_raw = raw.get("environments"), raw.get("scenes")
     if not isinstance(envs_raw, list) or not envs_raw:
         raise ValueError('"environments" precisa ter pelo menos um ambiente')
     if not isinstance(scenes_raw, list) or not scenes_raw:
         raise ValueError('"scenes" precisa ter pelo menos uma cena')
+    if len(scenes_raw) < min_scenes:
+        raise ValueError(f'"scenes" tem {len(scenes_raw)} cena(s); o usuário pediu no mínimo {min_scenes}. Acrescente cenas')
     used: set[str] = set()
     envs = []
     for i, e in enumerate(envs_raw, 1):
@@ -385,7 +388,8 @@ def validate_plan(raw: dict, bible: dict) -> dict:
     return {"areas": areas, "environments": envs, "scenes": scenes}
 
 
-def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int, catalog: set[str] | None = None, min_total: int = 70) -> dict:
+def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int, catalog: set[str] | None = None, min_total: int = 70,
+                   max_total: int = 0, min_clips: int = 0) -> dict:
     scene_ids = {s["id"] for s in plan["scenes"]}
     names = {c["name"].casefold(): c["name"] for c in bible["characters"]}
     cast_of = {s["id"]: list(s.get("characters") or []) for s in plan["scenes"]}
@@ -427,6 +431,10 @@ def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int, catalog: s
                       "dialogue_pt": _text(c, "dialogue_pt", where, required=False),
                       "continuity_pt": _text(c, "continuity_pt", where, required=False), "check_pt": _strings(c, "check_pt")})
     total = sum(c["duration_s"] for c in clips)
+    if len(clips) < min_clips:
+        raise ValueError(f"há {len(clips)} clipe(s); o usuário pediu no mínimo {min_clips} cenas, então são necessários pelo menos {min_clips} clipes")
+    if max_total and total > max_total:
+        raise ValueError(f"a soma das durações é {total} s; precisa ficar em no máximo {max_total} s (a duração pedida pelo usuário). Encurte ou remova clipes")
     if min_total and total <= min_total:
         raise ValueError(f"a soma das durações é {total} s; precisa ficar acima de {min_total} s (acrescente ou alongue clipes, respeitando o máximo por clipe)")
     return {"order_note_pt": _text(raw, "order_note_pt", "raiz", required=False), "clips": clips, "total_s": total}
