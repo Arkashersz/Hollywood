@@ -77,6 +77,7 @@ class Ctx:
     force: set = field(default_factory=set)          # itens a refazer mesmo já prontos (ajuste pedido numa etapa parada)
     sequel: dict | None = None      # continuação (parte 2+): {part, notes, story, characters, has_ref, doc02}
     clone: bool = False             # modo cópia fiel: roteiro, cortes e câmera idênticos ao original
+    direct_sheets: bool = False     # sem a etapa de imagens de corpo inteiro: a folha 16:9 sai direto da descrição
     story: dict | None = None       # história criada a partir de uma ideia: {idea, target_s, min_scenes}
     plan: dict | None = None        # prompts trazidos prontos pelo usuário (projeto iniciado numa etapa avançada)
     _generated: dict = field(default_factory=dict)
@@ -218,7 +219,8 @@ def adopt_bible(bible: dict, sequel: dict | None) -> list[str]:
             continue
         for key in ("slug", "fixed_description", "voice_only", "never_change_pt", "expressions", "details", "voice"):
             c[key] = old[key]
-        c["reused"] = bool(old["voice_only"]) or (Path(sequel["library"]) / render.body_path(old)).is_file()
+        library = Path(sequel["library"])
+        c["reused"] = bool(old["voice_only"]) or (library / render.body_path(old)).is_file() or (library / render.sheet_path(old)).is_file()
         if c["reused"]:
             names.append(c["name"])
     return names

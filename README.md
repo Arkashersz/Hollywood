@@ -144,3 +144,7 @@ Ao criar o projeto você escolhe o modelo do Claude (roteiro, personagens, promp
 ## Criar a partir de uma ideia de história
 
 Na aba **Tenho uma ideia de história** você escreve a ideia (pode ser uma frase), define a **duração do vídeo** e a **quantidade mínima de cenas**. Não há link: o Claude escreve o briefing, o roteiro em alemão, os personagens, as cenas e os prompts, no mesmo padrão dos outros projetos (gancho de 5 s impactantes no início, final com cliffhanger e convite para a parte 2, consistência de personagens). O worker confere o resultado: o plano de cenas precisa ter no mínimo as cenas pedidas e a soma dos clipes precisa ficar entre a duração pedida e +6 s (os clipes do Grok só têm 6, 10 ou 15 s); se não fechar, o Claude é chamado de novo. Exige a migração `0015_story_idea.sql`.
+
+## Folhas direto, sem imagem de corpo inteiro
+
+Projetos novos (link, cópia fiel, ideia de história e parte 2) não têm mais a etapa "Imagens dos personagens": o ChatGPT gera direto a **folha 16:9** de cada personagem, a partir da descrição fixa. São 1 imagem por personagem em vez de 2, o que poupa a cota do ChatGPT. Projetos antigos continuam com as 9 etapas, e o fluxo "Já tenho os prompts" não mudou. Exige a migração `0016_direct_sheets.sql`.

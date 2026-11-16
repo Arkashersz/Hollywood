@@ -49,6 +49,10 @@ class Db:
     def project(self, project_id: str) -> dict:
         return self.client.table("projects").select("*").eq("id", project_id).single().execute().data
 
+    def stage_keys(self, project_id: str) -> set[str]:
+        rows = self.client.table("project_stages").select("stage_key").eq("project_id", project_id).execute().data or []
+        return {r["stage_key"] for r in rows}
+
     def stage(self, stage_id: str) -> dict:
         return self.client.table("project_stages").select("*").eq("id", stage_id).single().execute().data
 

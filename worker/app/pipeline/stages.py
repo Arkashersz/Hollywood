@@ -220,14 +220,15 @@ async def character_bible(ctx: Ctx) -> dict:
     if reused:
         ctx.log(f"Já existem e voltam idênticos (sem gerar de novo): {', '.join(reused)}.")
     ctx.save_data("bible", bible)
-    ctx.write_doc("04", render.doc04(bible))
-    ctx.write_doc("05", render.doc05(bible))
+    ctx.write_doc("04", render.doc04(bible, ctx.direct_sheets))
+    ctx.write_doc("05", render.doc05(bible, ctx.direct_sheets))
     ctx.write_doc("06", render.doc06(bible))
     count = len([c for c in render.visible(bible) if not c.get("reused")])
+    unit = "folhas 16:9 de personagem" if ctx.direct_sheets else "imagens de corpo inteiro"
     new = [c["name"] for c in bible["characters"] if not c.get("reused")]
     note = f" Reaproveitados da parte anterior: {', '.join(reused)}. Novos: {', '.join(new) or 'nenhum'}." if reused else ""
     return {"summary": f"{len(bible['characters'])} personagem(ns) definidos, com estilo global e vozes.{note}",
-            "next_generation": {"service": "ChatGPT", "count": count, "unit": "imagens de corpo inteiro" + (" novas" if reused else "")}}
+            "next_generation": {"service": "ChatGPT", "count": count, "unit": unit + (" novas" if reused else "")}}
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +346,8 @@ def _character_items(ctx: Ctx) -> list[Item]:
 def _sheet_items(ctx: Ctx) -> list[Item]:
     bible = ctx.load_data("bible")
     return [Item(f"img-folha-{c['slug']}", f"{c['name']} · folha 16:9" + _adopt(ctx, f"img-folha-{c['slug']}", render.sheet_path(c), c.get("reused", False)),
-                 ctx.dir / render.sheet_path(c), render.sheet_prompt(bible, c), lambda c=c: [ctx.dir / render.body_path(c)]) for c in render.visible(bible)]
+                 ctx.dir / render.sheet_path(c), render.sheet_prompt(bible, c, not ctx.direct_sheets),
+                 (lambda: []) if ctx.direct_sheets else (lambda c=c: [ctx.dir / render.body_path(c)])) for c in render.visible(bible)]
 
 
 def _scene_items(ctx: Ctx) -> list[Item]:
@@ -363,7 +365,7 @@ def _scene_items(ctx: Ctx) -> list[Item]:
 
 def _clip_items(ctx: Ctx) -> list[Item]:
     bible, clips = ctx.load_data("bible"), ctx.load_data("clips")
-    catalog = render.image_catalog(bible, ctx.load_data("plan"))
+    catalog = render.image_catalog(bible, ctx.load_data("plan"), ctx.direct_sheets)
 
     def start_image(clip: dict) -> list[Path]:
         """Exatamente as imagens que o Claude indicou para este clipe, na ordem (a primeira é o quadro inicial)."""
@@ -458,7 +460,7 @@ async def scene_images(ctx: Ctx) -> dict:
 async def video_prompts(ctx: Ctx) -> dict:
     bible, plan = ctx.load_data("bible"), ctx.load_data("plan")
     prev09, prev10 = ctx.previous("09"), ctx.previous("10")
-    catalog = render.image_catalog(bible, plan)
+    catalog = render.image_catalog(bible, plan, ctx.direct_sheets)
     prompt = prompts.clips(ctx.read_doc("02"), ctx.read_doc("03"), bible, plan, ctx.max_clip, _previous_data(ctx, "clips"), ctx.feedback, catalog, ctx.clone, ctx.story)
     ctx.log("Pedindo os prompts de vídeo ao Claude…")
     if ctx.story:   # duração e quantidade de cenas escolhidas pelo usuário (os clipes só têm 6, 10 ou 15 s, então há uma folga)

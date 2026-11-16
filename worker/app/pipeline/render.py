@@ -58,11 +58,14 @@ def full_body_prompt(bible: dict, ch: dict) -> str:
             "plain light-gray seamless background, no other characters, no text. Vertical 2:3 portrait format.")
 
 
-def sheet_prompt(bible: dict, ch: dict) -> str:
+def sheet_prompt(bible: dict, ch: dict, with_reference: bool = True) -> str:
     expressions = ", ".join(ch["expressions"]) or "neutral, happy, sad, angry, surprised, afraid"
     details = ", ".join(ch["details"]) or "outfit and accessories"
     return (f"{bible['style_block']}\n\nCharacter: {ch['fixed_description']}\n\n"
-            "Character reference sheet in landscape 16:9 format. Use the attached image as the exact identity reference: same face, body, outfit and colors in every view. "
+            "Character reference sheet in landscape 16:9 format. "
+            + ("Use the attached image as the exact identity reference: same face, body, outfit and colors in every view. " if with_reference else
+               "Design this character exactly as described above, with the same face, body, outfit, colors and accessories in every view. ")
+            +
             f"Include: full body front view and side profile, a face close-up, facial expressions ({expressions}), and detail callouts ({details}). "
             "Plain neutral background, clean layout, no text or labels.")
 
@@ -123,7 +126,7 @@ def visible(bible: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Documentos
 # ---------------------------------------------------------------------------
-def doc04(bible: dict) -> str:
+def doc04(bible: dict, direct: bool = False) -> str:
     parts = ["## Bloco de estilo global", "Colado, idêntico, em todos os prompts de imagem.", _code(bible["style_block"]), bible["style_explanation_pt"]]
     for ch in bible["characters"]:
         parts += [f"## {ch['name']}", f"**Papel:** {ch['role_pt'] or NA}"]
@@ -133,19 +136,22 @@ def doc04(bible: dict) -> str:
             parts.append("Personagem só de voz (sem imagem). Veja o Documento 06.")
             continue
         parts += ["**Descrição fixa** (imutável, colada em todo prompt em que aparece):", _code(ch["fixed_description"]),
-                  "**Nunca pode mudar:**", _bullets(ch["never_change_pt"]),
-                  f"**Prompt da imagem de corpo inteiro** → `{body_path(ch).as_posix()}`", _code(full_body_prompt(bible, ch))]
-    parts.append("## O que você decide\nAo aprovar, o worker gera no ChatGPT uma imagem de corpo inteiro por personagem, com exatamente os prompts acima.")
+                  "**Nunca pode mudar:**", _bullets(ch["never_change_pt"])]
+        if not direct:
+            parts += [f"**Prompt da imagem de corpo inteiro** → `{body_path(ch).as_posix()}`", _code(full_body_prompt(bible, ch))]
+    parts.append("## O que você decide\nAo aprovar, o worker gera no ChatGPT direto a folha 16:9 de cada personagem (Documento 05), sem imagem de corpo inteiro antes." if direct else
+                 "## O que você decide\nAo aprovar, o worker gera no ChatGPT uma imagem de corpo inteiro por personagem, com exatamente os prompts acima.")
     return "\n\n".join(p for p in parts if p)
 
 
-def doc05(bible: dict) -> str:
-    parts = ["Uma folha 16:9 por personagem, gerada a partir da imagem de corpo inteiro aprovada (anexada como referência)."]
+def doc05(bible: dict, direct: bool = False) -> str:
+    parts = ["Uma folha 16:9 por personagem, gerada direto da descrição fixa (sem imagem de corpo inteiro antes)." if direct else
+             "Uma folha 16:9 por personagem, gerada a partir da imagem de corpo inteiro aprovada (anexada como referência)."]
     for ch in visible(bible):
-        parts += [f"## {ch['name']}", f"**Referência anexada:** `{body_path(ch).as_posix()}`  \n**Arquivo:** `{sheet_path(ch).as_posix()}`",
+        parts += [f"## {ch['name']}", (f"**Arquivo:** `{sheet_path(ch).as_posix()}`" if direct else f"**Referência anexada:** `{body_path(ch).as_posix()}`  \n**Arquivo:** `{sheet_path(ch).as_posix()}`"),
                   "**A folha cobre:** corpo inteiro (frente e perfil), rosto em close, expressões e detalhes.",
                   "**Expressões:**", _bullets(ch["expressions"]), "**Detalhes:**", _bullets(ch["details"]),
-                  "**Prompt:**", _code(sheet_prompt(bible, ch))]
+                  "**Prompt:**", _code(sheet_prompt(bible, ch, not direct))]
     return "\n\n".join(parts)
 
 
@@ -193,7 +199,7 @@ def doc07(bible: dict, plan: dict) -> str:
     return "\n\n".join(parts)
 
 
-def image_catalog(bible: dict, plan: dict) -> dict[str, dict]:
+def image_catalog(bible: dict, plan: dict, direct: bool = False) -> dict[str, dict]:
     """Imagens aprovadas que um clipe pode usar como referência: id -> {label, path}. O Claude escolhe pelos ids."""
     out: dict[str, dict] = {}
     for s in plan["scenes"]:
@@ -202,7 +208,8 @@ def image_catalog(bible: dict, plan: dict) -> dict[str, dict]:
         out[f"ambiente-{e['slug']}"] = {"label": f"Ambiente {e['name']}", "path": env_path(e)}
     for c in visible(bible):
         out[f"folha-{c['slug']}"] = {"label": f"Folha 16:9 de {c['name']}", "path": sheet_path(c)}
-        out[f"personagem-{c['slug']}"] = {"label": f"{c['name']} de corpo inteiro", "path": body_path(c)}
+        if not direct:
+            out[f"personagem-{c['slug']}"] = {"label": f"{c['name']} de corpo inteiro", "path": body_path(c)}
     return out
 
 

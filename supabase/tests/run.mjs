@@ -50,8 +50,8 @@ const [project] = await q(`select * from create_project($1,$2)`, ['  Teste  ', '
 assert.equal(project.title, 'Teste');
 assert.equal(project.status, 'active');
 let stages = await q(`select * from project_stages where project_id=$1 order by stage_order`, [project.id]);
-assert.equal(stages.length, 9);
-assert.deepEqual(stages.map((s) => s.status), ['queued', ...Array(8).fill('locked')]);
+assert.equal(stages.length, 8);
+assert.deepEqual(stages.map((s) => s.status), ['queued', ...Array(7).fill('locked')]);
 let jobs = await q(`select * from jobs where project_id=$1`, [project.id]);
 assert.equal(jobs.length, 1);
 assert.equal(jobs[0].input.stage_key, 'analysis');
@@ -62,7 +62,7 @@ await fails(`insert into projects(owner_id,title) values ($1,'direto')`, [B], /r
 await as(A);
 assert.equal((await q(`select * from studio_owner`)).length, 0, 'tabela do dono não é legível pelo painel');
 step('só o dono cria projetos; inserção direta e leitura do dono são bloqueadas');
-step('create_project grava 9 etapas e enfileira a análise');
+step('create_project grava 8 etapas (sem imagens de corpo inteiro) e enfileira a análise');
 
 // --- isolamento entre usuários ----------------------------------------------
 await as(B);
@@ -137,7 +137,7 @@ step('regenerate_item só para imagem/vídeo, uma tarefa por vez, só do dono');
 // --- aprovar até o fim -----------------------------------------------------------
 await as(null, 'service_role');
 await db.query(`update jobs set status='succeeded' where project_id=$1`, [project.id]);
-for (let i = 0; i < 9; i++) {
+for (let i = 0; i < 8; i++) {
   await as(null, 'service_role');
   await db.query(`update jobs set status='succeeded' where project_id=$1`, [project.id]);
   await db.query(`update project_stages set status='pending_review' where id=$1`, [stages[i].id]);
@@ -145,7 +145,7 @@ for (let i = 0; i < 9; i++) {
   [s] = await q(`select * from decide_stage($1,'approve')`, [stages[i].id]);
   assert.equal(s.status, 'approved');
   const after = await q(`select * from project_stages where project_id=$1 order by stage_order`, [project.id]);
-  if (i < 8) {
+  if (i < 7) {
     assert.equal(after[i + 1].status, 'queued');
     const queued = await q(`select * from jobs where project_id=$1 and status='queued'`, [project.id]);
     assert.equal(queued.length, 1);
@@ -156,7 +156,7 @@ for (let i = 0; i < 9; i++) {
 const [done] = await q(`select * from projects where id=$1`, [project.id]);
 assert.equal(done.status, 'completed');
 assert.equal(done.current_stage, 'production');
-assert.equal((await q(`select * from approvals where project_id=$1`, [project.id])).length, 10);
+assert.equal((await q(`select * from approvals where project_id=$1`, [project.id])).length, 9);
 assert.ok((await q(`select * from events where project_id=$1`, [project.id])).length >= 12);
 step('aprovações liberam uma etapa por vez e concluem o projeto');
 
@@ -324,7 +324,7 @@ const [s2] = await q(`select * from create_sequel($1, null, null, 'um dragão ap
 assert.equal(s2.part, 2); assert.equal(s2.parent_id, par.id); assert.equal(s2.mode, 'inspired', 'sem link não há o que copiar');
 assert.equal(s2.source_url, null); assert.equal(s2.sequel_notes, 'um dragão aparece'); assert.match(s2.title, /Banana · Parte 2/);
 const st2 = await q(`select stage_key, title, status from project_stages where project_id=$1 order by stage_order`, [s2.id]);
-assert.equal(st2.length, 9); assert.equal(st2[0].title, 'Resumo da parte anterior'); assert.equal(st2[0].status, 'queued');
+assert.equal(st2.length, 8); assert.equal(st2[0].title, 'Resumo da parte anterior'); assert.equal(st2[0].status, 'queued');
 assert.equal((await q(`select * from jobs where project_id=$1 and status='queued'`, [s2.id])).length, 1);
 await as(null, 'service_role');
 await db.query(`update projects set status='completed' where id=$1`, [s2.id]);
@@ -342,7 +342,7 @@ const [story] = await q(`select * from create_story_project($1,$2,$3,$4)`, ['  E
 assert.equal(story.mode, 'story'); assert.equal(story.source_url, null);
 assert.equal(story.story_idea, 'Uma menina e um espelho'); assert.equal(story.target_seconds, 36); assert.equal(story.min_scenes, 6);
 const storyStages = await q(`select * from project_stages where project_id=$1 order by stage_order`, [story.id]);
-assert.equal(storyStages.length, 9); assert.equal(storyStages[0].title, 'Briefing da história'); assert.equal(storyStages[0].status, 'queued');
+assert.equal(storyStages.length, 8); assert.equal(storyStages[0].title, 'Briefing da história'); assert.equal(storyStages[0].status, 'queued');
 assert.equal((await q(`select * from jobs where project_id=$1`, [story.id])).length, 1);
 await fails(`select create_story_project('x', '  ', 60, 5)`, [], /Conte a ideia/);
 await fails(`select create_story_project('x', 'ideia', 10, 5)`, [], /entre 15 e 300/);

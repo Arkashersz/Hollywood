@@ -712,3 +712,37 @@ def test_story_clip_stage_asks_for_the_chosen_duration_and_blocks_a_plan_that_mi
         run(ctx, "video_prompts")
     prompt = next(a["prompt"] for a in llm.asks if "você é o EDITOR" in a["prompt"])
     assert "entre 36 e 42 segundos" in prompt and "GANCHO DE 5 SEGUNDOS" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Folhas direto, sem a etapa de imagens de corpo inteiro
+# ---------------------------------------------------------------------------
+def test_direct_sheets_skip_the_body_image_and_use_only_the_text_description(project):
+    ctx, llm, video, _ = project
+    ctx.direct_sheets = True
+    run(ctx, "analysis"); run(ctx, "script")
+    bible = run(ctx, "character_bible")
+    assert bible["next_generation"]["unit"] == "folhas 16:9 de personagem" and bible["next_generation"]["count"] == 2
+    assert "sem imagem de corpo inteiro" in (ctx.dir / "04-personagens.md").read_text(encoding="utf-8")
+    assert "Prompt da imagem de corpo inteiro" not in (ctx.dir / "04-personagens.md").read_text(encoding="utf-8")
+    out = run(ctx, "character_sheets")
+    assert "2 folha(s)" in out["summary"]
+    assert len(llm.images) == 2 and all(i["refs"] == [] for i in llm.images)
+    assert all("attached image" not in i["prompt"] and "Design this character exactly as described" in i["prompt"] for i in llm.images)
+    assert not (ctx.dir / "imagens" / "personagens").exists()
+    run(ctx, "visual_plan"); run(ctx, "scene_images")
+    run(ctx, "video_prompts")
+    clips_prompt = next(a["prompt"] for a in llm.asks if "você é o EDITOR" in a["prompt"])
+    assert "de corpo inteiro" not in clips_prompt and "folha-anna" in clips_prompt
+    run(ctx, "production")
+    assert video.calls
+
+
+def test_direct_sheets_flag_comes_from_the_missing_stage_not_from_the_mode():
+    from app import main
+    class Db:
+        def __init__(self, keys): self.keys = keys
+        def stage_keys(self, _): return self.keys
+    assert main.has_no_body_stage(Db({"analysis", "character_sheets"}), {"id": "p"}) is True
+    assert main.has_no_body_stage(Db({"analysis", "character_images", "character_sheets"}), {"id": "p"}) is False
+    assert main.has_no_body_stage(object(), {"id": "p"}) is False
