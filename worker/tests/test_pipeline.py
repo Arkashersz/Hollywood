@@ -746,3 +746,22 @@ def test_direct_sheets_flag_comes_from_the_missing_stage_not_from_the_mode():
     assert main.has_no_body_stage(Db({"analysis", "character_sheets"}), {"id": "p"}) is True
     assert main.has_no_body_stage(Db({"analysis", "character_images", "character_sheets"}), {"id": "p"}) is False
     assert main.has_no_body_stage(object(), {"id": "p"}) is False
+
+
+def test_clone_dossier_is_requested_and_inherited_by_bible_plan_and_clips(project):
+    ctx, llm, video, sink = project
+    ctx.clone = True
+    run(ctx, "analysis")
+    assert "Dossiê de estilo" in llm.asks[0]["prompt"] and "Estilo de animação e render" in llm.asks[0]["prompt"]
+    doc01 = ctx.read_doc("01")
+    ctx.write_doc("01", doc01 + "\n\n## 15. Dossiê de estilo (modelo do vídeo)\n### 15.1 Estilo\nClaymation com cadência em 2.\n")
+    run(ctx, "script")
+    assert "seção 15" in next(a["prompt"] for a in llm.asks if "ROTEIRISTA do REMAKE FIEL" in a["prompt"])
+    run(ctx, "character_bible")
+    bible_prompt = llm.asks[-1]["prompt"]
+    assert "dossie-de-estilo-do-original" in bible_prompt and "Claymation com cadência em 2" in bible_prompt and "receita de design" in bible_prompt
+    run(ctx, "character_images"); run(ctx, "character_sheets"); run(ctx, "visual_plan")
+    assert "Claymation com cadência em 2" in llm.asks[-1]["prompt"]
+    run(ctx, "scene_images"); run(ctx, "video_prompts")
+    clips_prompt = next(a["prompt"] for a in llm.asks if "EDITOR" in a["prompt"] and "image-to-video" in a["prompt"])
+    assert "Claymation com cadência em 2" in clips_prompt and "ANIMATION AND CAMERA BLOCK" in clips_prompt

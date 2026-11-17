@@ -6,6 +6,7 @@ para poder conferir o resultado; a parte criativa é do modelo e a aprovação �
 from __future__ import annotations
 
 import json
+import re
 
 BASE = """Você está ajudando a produzir um vídeo ORIGINAL para o TikTok, em alemão, inspirado em um vídeo de referência (inspiração, nunca cópia).
 
@@ -20,7 +21,7 @@ MD_OUT = """Formato da resposta: somente o documento, em Markdown, começando di
 JSON_OUT = """Formato da resposta: um único bloco ```json contendo um objeto JSON válido, sem nenhum texto antes ou depois. Use aspas duplas, sem comentários e sem vírgulas sobrando."""
 
 
-CLONE_BASE = """Você está ajudando a produzir um REMAKE FIEL, em alemão, de um vídeo de referência do TikTok: o novo vídeo é uma cópia do original em roteiro, estrutura, cortes, ritmo, enquadramentos e jeito de a câmera funcionar. O que muda é só o personagem/elemento central (por exemplo: o original é uma banana, o novo é um morango; mesmo papel, mesma personalidade, mesmas ações, no lugar da banana) e o que depende diretamente dessa troca (nome, falas que citam o elemento, objetos e cores ligados a ele).
+CLONE_BASE = """Você está ajudando a produzir um REMAKE FIEL, em alemão, de um vídeo de referência do TikTok: o novo vídeo é uma cópia do original em roteiro, estrutura, cortes, ritmo, enquadramentos e jeito de a câmera funcionar. Por PADRÃO nada muda: os personagens também são copiados do original (mesma identidade, mesmo design, mesma aparência, mesmo nome, mesma personalidade, mesmo jeito de falar). Só se o usuário pedir, nos ajustes, a troca de um personagem/elemento central (por exemplo: o original é uma banana e ele quer um morango no mesmo papel, com a mesma personalidade e as mesmas ações), troque exatamente o que ele pediu e o que depende diretamente disso (nome, falas que citam o elemento, objetos e cores ligados a ele), mantendo o design, o estilo e o comportamento do original.
 
 Regras gerais:
 - Documentação em português do Brasil. Falas, narração e textos que aparecem no vídeo ficam em alemão, com a tradução em português ao lado.
@@ -35,9 +36,36 @@ CLONE_RULES = """MODO CÓPIA FIEL (regras que valem acima de qualquer sugestão 
 - Aparência dos ambientes idêntica ao original, salvo a troca de blocos de cena SE o usuário a tiver aprovado."""
 
 CLONE_ANALYSIS = """
-## 14. Mapa plano a plano (base da cópia fiel) — uma linha por plano, TODOS os planos do vídeo, na ordem: nº · início–fim (s) · duração · enquadramento e distância · ângulo e altura da câmera · lente aparente · movimento de câmera exato (tipo, direção, velocidade) · ação passo a passo · falas (original) · texto na tela · transição para o próximo plano · ambiente. Este mapa será copiado literalmente; seja preciso e não resuma planos parecidos."""
+## 14. Mapa plano a plano (base da cópia fiel) — uma linha por plano, TODOS os planos do vídeo, na ordem: nº · início–fim (s) · duração · enquadramento e distância · ângulo e altura da câmera · lente aparente · movimento de câmera exato (tipo, direção, velocidade) · ação passo a passo · falas (original) · texto na tela · transição para o próximo plano · ambiente. Este mapa será copiado literalmente; seja preciso e não resuma planos parecidos.
+## 15. Dossiê de estilo (modelo do vídeo) — a análise mais importante da cópia fiel; o remake inteiro herda este dossiê, então seja minucioso, concreto e preciso, e dê preferência a medidas, nomes de técnica e exemplos com tempo (ex.: "aos 4 s"). Marque o que for inferido. Use os quadros anexados para cada item:
+### 15.1 Estilo de animação e render — técnica (3D Pixar-like, 3D low-poly, 2D, stop-motion, claymation, massinha, fotorrealista, CGI hiper-real, cel shading etc.), qualidade, acabamento, textura de superfícies, grão, profundidade de campo, desfoque, fps aparente e suavidade do movimento (cadência "em 2" ou "em 3", exagero de squash and stretch, física).
+### 15.2 Cor, luz e atmosfera — paleta dominante e de apoio, saturação, contraste, tipo e direção da luz, sombras, brilho/bloom, colorização por cena e tom geral.
+### 15.3 Design dos personagens (cada um) — proporção do corpo e da cabeça (cabeça em relação ao corpo), formato geral, olhos (tamanho, formato, brilho, distância), boca, nariz, sobrancelhas, membros (finos, grossos, existem mãos?), materiais e texturas, roupas e acessórios, nível de detalhe, regras de simplificação, e o que torna o design reconhecível. Escreva como "receita de design" que outra pessoa conseguiria aplicar a um personagem novo.
+### 15.4 Expressões e atuação — repertório de expressões faciais (olhos, sobrancelhas, boca), intensidade, quão exageradas, tempo de reação, piscadas, olhar (para a câmera ou não), linguagem corporal, gestos recorrentes.
+### 15.5 Fala e comportamento — como cada personagem fala (ritmo, volume, hesitações, gritos, sussurros, ênfases, sincronia labial e abertura da boca), personalidade na ação, como reage, como se move (andar, pulo, tremor), tiques e padrões repetidos de comportamento e de humor.
+### 15.6 Câmera — assinatura da câmera: lente e distância típicas, altura e ângulos preferidos, movimentos recorrentes (tipo, direção, velocidade, aceleração), rotação e órbita em torno do personagem, câmera na mão ou estável, zooms e punch-ins, rack focus, tremor, reenquadramentos, como a câmera segue a ação e o que ela faz nos momentos de impacto.
+### 15.7 Edição e ritmo — duração típica dos planos, tipo de corte e transição, efeitos (shake, flash, zoom rápido, slow motion), texto na tela (fonte, cor, contorno, posição, animação), áudio e sons recorrentes.
+### 15.8 Prompt-modelo de estilo — dois blocos prontos para colar, em INGLÊS, que descrevem o estilo SEM citar o personagem original: (a) "STYLE BLOCK": estilo de render, paleta, luz, lente e qualidade; (b) "ANIMATION AND CAMERA BLOCK": como o movimento, a câmera, as expressões e a atuação funcionam. Eles serão reutilizados em todos os prompts do remake.
+### 15.9 O que vai mudar e o que fica — lista curta: por padrão nada muda (personagens incluídos, tudo fica IDÊNTICO); liste só o que o usuário pedir para trocar."""
 
-CLONE_SCRIPT = """TAREFA: você é o ROTEIRISTA do REMAKE FIEL. Reescreva a referência como roteiro em alemão, plano a plano, IDÊNTICO ao original, trocando apenas o personagem/elemento central e o que depende dele.
+DOSSIER_MARK = "## 15. Dossiê de estilo"
+
+
+def clone_dossier(doc01_md: str) -> str:
+    """Seção 15 da ficha (estilo de animação, design, expressões, câmera…), que o remake herda inteira."""
+    m = re.search(r"^#{2,3}\s*(?:15[.\s]|.*Dossiê de estilo)", doc01_md, re.M)
+    return doc01_md[m.start():].strip() if m else ""
+
+
+def dossier_block(clone: bool, doc01_md: str | None) -> str:
+    text = clone_dossier(doc01_md) if (clone and doc01_md) else ""
+    if not text:
+        return ""
+    return "\n" + data("dossie-de-estilo-do-original", text) + """
+COPIE ESTE DOSSIÊ: o novo vídeo tem o MESMO estilo de animação, os MESMOS personagens e o MESMO design (proporções, olhos, materiais, nível de detalhe), as MESMAS expressões e atuação, o MESMO jeito de falar e de se comportar e a MESMA câmera. Um personagem só é trocado se o usuário pediu nos ajustes (ex.: morango → manga); nesse caso o novo personagem recebe o design do original aplicado a ele."""
+
+
+CLONE_SCRIPT = """TAREFA: você é o ROTEIRISTA do REMAKE FIEL. Reescreva a referência como roteiro em alemão, plano a plano, IDÊNTICO ao original, copiando também os personagens (aparência, nome, personalidade, jeito de falar), a menos que o usuário peça nos ajustes a troca de algum deles.
 
 {doc01}
 
@@ -45,15 +73,15 @@ CLONE_SCRIPT = """TAREFA: você é o ROTEIRISTA do REMAKE FIEL. Reescreva a refe
 
 {rules}
 
-Alemão: natural, de falante nativo, "du" como padrão; frases curtas, boas para voz de IA; números por extenso; sem siglas. Se o original já for em alemão, mantenha as falas, adaptando só o que citar o elemento trocado. Se for de outro idioma, traduza para o alemão com o mesmo sentido, o mesmo tom e o mesmo tamanho. Texto na tela em alemão, igual ao original em posição e momento.
+Alemão: natural, de falante nativo, "du" como padrão; frases curtas, boas para voz de IA; números por extenso; sem siglas. Se o original já for em alemão, mantenha as falas, adaptando só o que citar um elemento que o usuário pediu para trocar. Se for de outro idioma, traduza para o alemão com o mesmo sentido, o mesmo tom e o mesmo tamanho. Texto na tela em alemão, igual ao original em posição e momento.
 
 Escreva o Documento 03 · Roteiro (fiel) com estas seções:
-## 1. Cabeçalho — título de trabalho, logline (DE e PT), tom, tipo de áudio, personagens (nome, papel e uma linha cada) e a TROCA PRINCIPAL ("original: X → novo: Y") com o que muda por causa dela.
-## 2. Mapa original → novo — plano a plano, o que foi mantido (tudo) e o que mudou (só o que decorre da troca).
+## 1. Cabeçalho — título de trabalho, logline (DE e PT), tom, tipo de áudio, personagens (nome, papel e uma linha cada) e a TROCA DE PERSONAGEM: "nenhuma — personagens copiados do original" por padrão; só se o usuário pediu, escreva "original: X → novo: Y" com o que muda por causa dela.
+## 2. Mapa original → novo — plano a plano, o que foi mantido (tudo) e o que mudou (nada, a menos que o usuário tenha pedido uma troca).
 ## 3. Tabela de cenas — uma linha por plano do original: Cena · Início–Fim · Duração · Visual (PT) · Câmera (cópia exata do original) · Fala ou narração (DE) · Tradução (PT) · Texto na tela (DE) · Ritmo e áudio. Este roteiro está escrito 100% FIEL (sem troca de blocos), a não ser que o usuário já tenha pedido a troca nos ajustes abaixo.
 ## 4. Conta da duração — deve bater com a duração do original.
 ## 5. Texto corrido — em alemão e a tradução em português.
-## 6. Dúvidas ao usuário.
+## 6. Dúvidas ao usuário — inclua: "Mantive os personagens idênticos ao original. Quer trocar algum? Se sim, peça revisão dizendo qual e por quê."
 ## 7. Proposta de troca de blocos de cena — SEM mudar a história: proponha de 2 a 5 trocas do LOCAL/ambiente de blocos inteiros de cenas (um bloco = uma ou mais cenas seguidas), só para diferenciar do original, e só onde fizer sentido com a ação e a continuidade. Tabela: bloco (cenas) · local original · local proposto · por que funciona · o que continua igual (ação, câmera, falas). Termine com a pergunta: "Quer aplicar esta troca de blocos ou manter 100% fiel à história original? Para aplicar, peça revisão escrevendo 'aplicar a troca' (ou diga quais blocos); para manter fiel, é só aprovar." Se o usuário já pediu a troca, aplique-a na tabela de cenas e no mapa e marque aqui cada bloco como APLICADO.
 {revision}
 {md_out}"""
@@ -332,7 +360,7 @@ def doc03(doc01_md: str, doc02_md: str, max_clip: int, previous: str | None, fee
     if clone:
         return CLONE_BASE + "\n\n" + CLONE_SCRIPT.format(
             doc01=data('documento-01-ficha-da-referencia', doc01_md), doc02=data('documento-02-edicao-da-referencia', doc02_md),
-            rules=CLONE_RULES + "\n- Gancho e final do original são copiados fielmente. Na seção de dúvidas acrescente \"Avaliação do gancho e do final\": nota de 1 a 10 para o gancho (3 s) e para o final do original, por choque, curiosidade e vontade de ver a parte 2; se algum tiver nota abaixo de 8, sugira (sem aplicar) uma versão mais forte para o usuário decidir.\n" + f"- O Grok gera clipes de exatamente 6, 10 ou 15 s (máximo {max_clip} s por clipe); um plano mais longo vira clipes encadeados (\"7a\", \"7b\").",
+            rules=CLONE_RULES + "\n- Use a seção 15 (dossiê de estilo) da ficha: as falas mantêm o mesmo jeito de falar, o mesmo humor e os mesmos tiques; as ações mantêm o mesmo comportamento e as mesmas expressões; a coluna Câmera copia a assinatura de câmera do dossiê.\n- Gancho e final do original são copiados fielmente. Na seção de dúvidas acrescente \"Avaliação do gancho e do final\": nota de 1 a 10 para o gancho (3 s) e para o final do original, por choque, curiosidade e vontade de ver a parte 2; se algum tiver nota abaixo de 8, sugira (sem aplicar) uma versão mais forte para o usuário decidir.\n" + f"- O Grok gera clipes de exatamente 6, 10 ou 15 s (máximo {max_clip} s por clipe); um plano mais longo vira clipes encadeados (\"7a\", \"7b\").",
             revision=sequel_block(sequel) + revision(previous, feedback), md_out=MD_OUT)
     return f"""{BASE}
 
@@ -379,6 +407,7 @@ TAREFA: você é o CINEGRAFISTA. Defina a identidade visual e sonora dos persona
 {data('documento-03-roteiro', doc03_md)}
 
 {data('documento-01-ficha-da-referencia', doc01_md)}
+{dossier_block(clone, doc01_md)}
 
 Devolva este objeto:
 {{
@@ -406,12 +435,12 @@ Devolva este objeto:
 Em "fixed_description" liste CADA acessório e cor exata (óculos, boné, joias, cicatrizes, estampas) e repita os acessórios em "never_change_pt" (ex.: "sempre de óculos redondos e boné vermelho"). A descrição precisa bastar para qualquer pessoa desenhar o personagem sem errar nada.
 
 Inclua todos os personagens que aparecem no roteiro, inclusive um narrador sem corpo (nesse caso deixe "fixed_description" como "voice only" e as listas vazias). Não descreva voz nem aparência como imitação de pessoa real.
-{"No modo cópia fiel: um personagem novo para cada personagem do original (mesma quantidade, mesmos papéis e relações, mesma proporção e energia), trocando só o elemento central; o style_block deve reproduzir o estilo visual do original (tipo de render, paleta, luz, lente) o mais fiel possível." if clone else ""}
+{"No modo cópia fiel: COPIE cada personagem do original (mesma quantidade, mesmos papéis, nomes e relações, mesma aparência, proporção e energia); só troque um personagem se o usuário pediu nos ajustes, e então troque só ele; o style_block deve reproduzir o estilo visual do original (tipo de render, paleta, luz, lente) o mais fiel possível, partindo do STYLE BLOCK do dossiê (seção 15.8). Em fixed_description aplique a receita de design do dossiê (seção 15.3: proporções, olhos, boca, membros, materiais, nível de detalhe) a cada personagem, descrevendo-o tal como é no original (ou, se o usuário pediu a troca, o personagem novo no mesmo desenho animado); em expressions use o repertório de 15.4; em voice use o jeito de falar de 15.5 (ritmo, energia, tom)." if clone else ""}
 {sequel_characters(sequel)}{revision(previous, feedback)}
 {JSON_OUT}"""
 
 
-def visual_plan(doc03_md: str, bible: dict, previous: str | None, feedback: str | None, clone: bool = False, sequel: dict | None = None, story: dict | None = None) -> str:
+def visual_plan(doc03_md: str, bible: dict, previous: str | None, feedback: str | None, clone: bool = False, sequel: dict | None = None, story: dict | None = None, doc01_md: str | None = None) -> str:
     names = [c["name"] for c in bible["characters"]]
     min_scenes = f"\nQUANTIDADE MÍNIMA DE CENAS (definida pelo usuário): \"scenes\" precisa ter pelo menos {story['min_scenes']} entradas.\n" if story else ""
     return f"""{CLONE_BASE if clone else BASE}
@@ -421,7 +450,7 @@ TAREFA: você é o DESIGNER. Planeje os ambientes e a imagem inicial de cada cen
 {data('documento-03-roteiro', doc03_md)}
 
 {data('estilo-global', bible['style_block'])}
-
+{dossier_block(clone, doc01_md)}
 Personagens já aprovados (use estes nomes exatamente): {json.dumps(names, ensure_ascii=False)}
 
 Devolva este objeto:
@@ -449,12 +478,12 @@ Devolva este objeto:
 }}
 
 Uma entrada em "scenes" para cada cena (ou clipe encadeado que precise de imagem própria) do roteiro, na ordem. Ambientes recorrentes aparecem uma única vez em "environments". {CONSISTENCY_RULES}
-{min_scenes}{sequel_environments(sequel)}{CLONE_RULES + chr(10) + "- Uma cena por plano do original, com a mesma composição inicial do quadro original (ângulo, distância, posição e direção do olhar), só com o personagem trocado; o campo shot_pt copia a câmera do roteiro. Os ambientes seguem o roteiro aprovado (troca de blocos só se estiver aplicada nele)." if clone else ""}
+{min_scenes}{sequel_environments(sequel)}{CLONE_RULES + chr(10) + "- Uma cena por plano do original, com a mesma composição inicial do quadro original (ângulo, distância, posição e direção do olhar), com os mesmos personagens do original (trocados só se o usuário pediu); o campo shot_pt copia a câmera do roteiro. Os ambientes seguem o roteiro aprovado (troca de blocos só se estiver aplicada nele)." if clone else ""}
 {revision(previous, feedback)}
 {JSON_OUT}"""
 
 
-def clips(doc02_md: str, doc03_md: str, bible: dict, plan: dict, max_clip: int, previous: str | None, feedback: str | None, catalog: dict | None = None, clone: bool = False, story: dict | None = None) -> str:
+def clips(doc02_md: str, doc03_md: str, bible: dict, plan: dict, max_clip: int, previous: str | None, feedback: str | None, catalog: dict | None = None, clone: bool = False, story: dict | None = None, doc01_md: str | None = None) -> str:
     names = [c["name"] for c in bible["characters"]]
     scenes = [{"id": s["id"], "environment": s["environment"], "characters": s["characters"], "shot": s.get("shot_pt", "")} for s in plan["scenes"]]
     return f"""{CLONE_BASE if clone else BASE}
@@ -464,7 +493,8 @@ TAREFA: você é o EDITOR. Escreva os prompts de vídeo (image-to-video) de cada
 {data('documento-03-roteiro', doc03_md)}
 
 {data('documento-02-edicao-da-referencia', doc02_md)}
-
+{dossier_block(clone, doc01_md)}
+{"Em cada prompt de clipe aplique o ANIMATION AND CAMERA BLOCK do dossiê (15.8): mesmo movimento, mesma câmera, mesmas expressões e mesma atuação do original." if clone and doc01_md and clone_dossier(doc01_md) else ""}
 Cenas com imagem-base aprovada: {json.dumps(scenes, ensure_ascii=False)}
 Personagens (use estes nomes exatamente em "speakers"): {json.dumps(names, ensure_ascii=False)}
 Imagens aprovadas que podem ser anexadas ao clipe (use os ids exatamente em "reference_images"): {json.dumps({k: v["label"] for k, v in (catalog or {}).items()}, ensure_ascii=False)}

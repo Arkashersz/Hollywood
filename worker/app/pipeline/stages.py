@@ -436,7 +436,7 @@ async def character_sheets(ctx: Ctx) -> dict:
 # ---------------------------------------------------------------------------
 async def visual_plan(ctx: Ctx) -> dict:
     bible = ctx.load_data("bible")
-    prompt = prompts.visual_plan(ctx.read_doc("03"), bible, _previous_data(ctx, "plan"), ctx.feedback, ctx.clone, ctx.sequel, ctx.story)
+    prompt = prompts.visual_plan(ctx.read_doc("03"), bible, _previous_data(ctx, "plan"), ctx.feedback, ctx.clone, ctx.sequel, ctx.story, ctx.read_doc("01") if ctx.clone else None)
     ctx.log("Pedindo ambientes e imagens-base ao Claude…")
     plan = await ask_json(ctx.brain, prompt, lambda raw: validate_plan(raw, bible, int(ctx.story["min_scenes"]) if ctx.story else 0))
     reused = adopt_plan(plan, ctx.sequel)
@@ -461,7 +461,7 @@ async def video_prompts(ctx: Ctx) -> dict:
     bible, plan = ctx.load_data("bible"), ctx.load_data("plan")
     prev09, prev10 = ctx.previous("09"), ctx.previous("10")
     catalog = render.image_catalog(bible, plan, ctx.direct_sheets)
-    prompt = prompts.clips(ctx.read_doc("02"), ctx.read_doc("03"), bible, plan, ctx.max_clip, _previous_data(ctx, "clips"), ctx.feedback, catalog, ctx.clone, ctx.story)
+    prompt = prompts.clips(ctx.read_doc("02"), ctx.read_doc("03"), bible, plan, ctx.max_clip, _previous_data(ctx, "clips"), ctx.feedback, catalog, ctx.clone, ctx.story, ctx.read_doc("01") if ctx.clone else None)
     ctx.log("Pedindo os prompts de vídeo ao Claude…")
     if ctx.story:   # duração e quantidade de cenas escolhidas pelo usuário (os clipes só têm 6, 10 ou 15 s, então há uma folga)
         target, scenes = int(ctx.story["target_s"]), int(ctx.story["min_scenes"])
