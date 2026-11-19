@@ -18,7 +18,7 @@ from typing import Callable
 from .. import media
 from ..media import slugify
 from ..errors import Blocked
-from . import prompts, render
+from . import factory_stages, prompts, render
 from .core import Ctx, adopt_bible, adopt_plan, ask_json, strip_leading_title, validate_bible, validate_clips, validate_plan
 
 ORDER = ["analysis", "script", "character_bible", "character_images", "character_sheets",
@@ -224,7 +224,7 @@ async def character_bible(ctx: Ctx) -> dict:
     ctx.write_doc("05", render.doc05(bible, ctx.direct_sheets))
     ctx.write_doc("06", render.doc06(bible))
     count = len([c for c in render.visible(bible) if not c.get("reused")])
-    unit = "folhas 16:9 de personagem" if ctx.direct_sheets else "imagens de corpo inteiro"
+    unit = "folhas 9:16 de personagem" if ctx.direct_sheets else "imagens de corpo inteiro"
     new = [c["name"] for c in bible["characters"] if not c.get("reused")]
     note = f" Reaproveitados da parte anterior: {', '.join(reused)}. Novos: {', '.join(new) or 'nenhum'}." if reused else ""
     return {"summary": f"{len(bible['characters'])} personagem(ns) definidos, com estilo global e vozes.{note}",
@@ -345,7 +345,7 @@ def _character_items(ctx: Ctx) -> list[Item]:
 
 def _sheet_items(ctx: Ctx) -> list[Item]:
     bible = ctx.load_data("bible")
-    return [Item(f"img-folha-{c['slug']}", f"{c['name']} · folha 16:9" + _adopt(ctx, f"img-folha-{c['slug']}", render.sheet_path(c), c.get("reused", False)),
+    return [Item(f"img-folha-{c['slug']}", f"{c['name']} · folha 9:16" + _adopt(ctx, f"img-folha-{c['slug']}", render.sheet_path(c), c.get("reused", False)),
                  ctx.dir / render.sheet_path(c), render.sheet_prompt(bible, c, not ctx.direct_sheets),
                  (lambda: []) if ctx.direct_sheets else (lambda c=c: [ctx.dir / render.body_path(c)])) for c in render.visible(bible)]
 
@@ -410,7 +410,7 @@ ITEM_BUILDERS = _BUILDERS
 
 def _imported_next(ctx: Ctx) -> dict:
     """Próximo lote autorizado pela aprovação, num projeto com prompts prontos (as etapas sem itens foram puladas)."""
-    units = {"character_images": ("ChatGPT", "imagens de personagens"), "character_sheets": ("ChatGPT", "folhas 16:9"),
+    units = {"character_images": ("ChatGPT", "imagens de personagens"), "character_sheets": ("ChatGPT", "folhas 9:16"),
              "scene_images": ("ChatGPT", "imagens de ambiente e cena"), "production": ("Grok", "vídeos")}
     for key in ORDER[ORDER.index(ctx.stage_key) + 1:]:
         if key in units and ctx.plan.get(key):
@@ -421,14 +421,14 @@ def _imported_next(ctx: Ctx) -> dict:
 async def character_images(ctx: Ctx) -> dict:
     items = items_for(ctx, "character_images")
     stats = await generate(ctx, items, note=ctx.feedback)
-    nxt = _imported_next(ctx) if ctx.plan else {"next_generation": {"service": "ChatGPT", "count": len(items), "unit": "folhas 16:9"}}
+    nxt = _imported_next(ctx) if ctx.plan else {"next_generation": {"service": "ChatGPT", "count": len(items), "unit": "folhas 9:16"}}
     return {"summary": f"{len(items)} imagem(ns) de corpo inteiro ({stats['made']} gerada(s) agora).{_reused_count(items)}", **nxt}
 
 
 async def character_sheets(ctx: Ctx) -> dict:
     items = items_for(ctx, "character_sheets")
     stats = await generate(ctx, items, note=ctx.feedback)
-    return {"summary": f"{len(items)} folha(s) 16:9 ({stats['made']} gerada(s) agora).{_reused_count(items)}", **(_imported_next(ctx) if ctx.plan else {})}
+    return {"summary": f"{len(items)} folha(s) 9:16 ({stats['made']} gerada(s) agora).{_reused_count(items)}", **(_imported_next(ctx) if ctx.plan else {})}
 
 
 # ---------------------------------------------------------------------------
@@ -493,12 +493,14 @@ async def production(ctx: Ctx) -> dict:
                 "pilot": True, "pilot_remaining": len(items) - 1}
     stats = await generate(ctx, items, note=ctx.feedback)
     total = round(sum(media.probe(i.path)["duration"] for i in items), 1)
-    if ctx.story:
+    if ctx.profile:   # Fábrica de roteiros: o alvo é o do perfil (os clipes são de 6 ou 10 s; o excesso é cortado na edição)
+        warnings = [] if total >= ctx.profile["min_s"] else [f"A soma real dos clipes é {total} s, abaixo da meta mínima de {ctx.profile['min_s']} s do perfil. Regenere clipes ou ajuste cenas."]
+    elif ctx.story:
         target = int(ctx.story["target_s"])
         warnings = [] if abs(total - target) <= max(8, target * 0.2) else [f"A soma real dos clipes é {total} s, longe da meta de {target} s. Regenere ou ajuste clipes antes de editar."]
     else:
         warnings = [] if (total > 70 or ctx.plan or ctx.clone) else [f"A soma real dos clipes é {total} s, abaixo da meta de 70 s. Regenere clipes mais longos ou acrescente cenas."]
-    return {"summary": f"{len(items)} clipe(s), {total} s no total ({stats['made']} gerado(s) agora). Próximo passo: editar no CapCut conforme o Documento 09.",
+    return {"summary": f"{len(items)} clipe(s), {total} s no total ({stats['made']} gerado(s) agora). " + ("Próximo passo: editar (cortar o excesso de cada clipe, legendas e música)." if ctx.profile else "Próximo passo: editar no CapCut conforme o Documento 09."),
             "warnings": warnings}
 
 
@@ -507,6 +509,9 @@ HANDLERS: dict[str, Callable] = {
     "character_sheets": character_sheets, "visual_plan": visual_plan, "scene_images": scene_images,
     "video_prompts": video_prompts, "production": production,
 }
+
+
+HANDLERS.update(factory_stages.HANDLERS)   # Fábrica de roteiros + workflow de animação (modo "factory")
 
 
 async def run_stage(ctx: Ctx) -> dict:

@@ -353,4 +353,57 @@ await fails(`select create_story_project('x', 'ideia', 60, 5)`, [], /pertence a 
 await as(A);
 step('create_story_project grava ideia, duração e cenas mínimas, e valida os limites');
 
+// --- Fábrica de roteiros + workflow de animação ------------------------------------
+await as(A);
+const prof = { niche: 'Frutinhas', min_s: 90, max_s: 120, min_scenes: 12, references: ['https://tiktok.com/a'], audio: 'ambos' };
+const [fac] = await q(`select * from create_factory_project($1,$2::jsonb)`, ['  Novela ', JSON.stringify(prof)]);
+assert.equal(fac.mode, 'factory'); assert.equal(fac.title, 'Novela'); assert.equal(fac.current_stage, 'f_refs'); assert.equal(fac.profile.niche, 'Frutinhas');
+const facStages = await q(`select stage_key, stage_order, title, status from project_stages where project_id=$1 order by stage_order`, [fac.id]);
+assert.deepEqual(facStages.map((x) => x.stage_key), ['f_refs', 'f_proposals', 'f_script', 'f_bible', 'f_workflow', 'character_sheets', 'scene_images', 'production']);
+assert.deepEqual(facStages.map((x) => x.status), ['queued', ...Array(7).fill('locked')]);
+assert.ok(facStages.filter((x) => /9:16/.test(x.title)).length === 3 && !facStages.some((x) => /16:9/.test(x.title)), 'tudo em 9:16');
+assert.equal((await q(`select * from jobs where project_id=$1`, [fac.id]))[0].input.stage_key, 'f_refs');
+await fails(`select create_factory_project('x', '[]'::jsonb)`, [], /inválido/);
+await fails(`select create_factory_project('x', $1::jsonb)`, [JSON.stringify({ references: ['1', '2', '3', '4', '5', '6'] })], /no máximo 5/);
+await fails(`select create_factory_project('x', $1::jsonb)`, [JSON.stringify({ min_s: 100, max_s: 60 })], /máxima/);
+await fails(`select create_factory_project('x', $1::jsonb)`, [JSON.stringify({ scene_max_s: 15 })], /10 segundos/);
+await fails(`select create_factory_project('x', $1::jsonb)`, [JSON.stringify({ min_s: 30, max_s: 60, min_scenes: 12 })], /somam 72 s/);
+await fails(`select create_factory_project('x', $1::jsonb)`, [JSON.stringify({ audio: 'mudo' })], /áudio inválido/);
+const [dflt] = await q(`select * from create_factory_project('Padrão', '{}'::jsonb)`);
+assert.equal(dflt.mode, 'factory');
+await as(B);
+await fails(`select create_factory_project('invasor', '{}'::jsonb)`, [], /pertence a outra conta/);
+await as(A);
+// escolher a história: só na etapa de propostas e enquanto ela está em revisão
+const facIds = Object.fromEntries((await q(`select id, stage_key from project_stages where project_id=$1`, [fac.id])).map((x) => [x.stage_key, x.id]));
+await fails(`select choose_proposal($1, 2)`, [facIds.f_proposals], /em revisão/);
+await as(null, 'service_role');
+await db.query(`update project_stages set status='pending_review' where id=$1 or id=$2`, [facIds.f_proposals, facIds.f_refs]);
+await as(A);
+await fails(`select choose_proposal($1, 2)`, [facIds.f_refs], /não tem propostas/);
+await fails(`select choose_proposal($1, 6)`, [facIds.f_proposals], /de 1 a 5/);
+const [chosen] = await q(`select * from choose_proposal($1, 4)`, [facIds.f_proposals]);
+assert.equal(chosen.payload.chosen, 4);
+await as(B);
+await fails(`select choose_proposal($1, 1)`, [facIds.f_proposals], /not found|access denied/);
+await as(A);
+// aprovar as propostas libera o roteiro e mantém a escolha
+await q(`select * from decide_stage($1,'approve')`, [facIds.f_proposals]);
+const [afterApprove] = await q(`select status, payload from project_stages where id=$1`, [facIds.f_proposals]);
+assert.equal(afterApprove.status, 'approved'); assert.equal(afterApprove.payload.chosen, 4);
+assert.equal((await q(`select status from project_stages where id=$1`, [facIds.f_script]))[0].status, 'queued');
+step('create_factory_project / choose_proposal: perfil validado, 8 etapas em 9:16, escolha da história e só o dono');
+
+// acesso remoto aos vídeos: endereço e senha só para o dono; ninguém escreve pelo painel
+await as(null, 'service_role');
+await db.query(`insert into worker_media(worker_id, local_url, public_url, token) values ('pc', 'http://127.0.0.1:8765', 'https://x.trycloudflare.com', 'senha')`);
+await as(A);
+assert.equal((await q(`select token from worker_media`)).length, 1);
+await as(B);
+assert.equal((await q(`select token from worker_media`)).length, 0, 'outra conta não vê a senha dos vídeos');
+await fails(`insert into worker_media(worker_id, token) values ('x', 'y')`, [], /row-level security|permission denied/);
+await as(A);
+await fails(`insert into worker_media(worker_id, token) values ('x', 'y')`, [], /row-level security|permission denied/);
+step('worker_media: só o dono lê a senha dos vídeos e o painel não escreve');
+
 console.log('Todas as verificações de SQL passaram.');

@@ -3,13 +3,11 @@ from __future__ import annotations
 
 import io
 import json
-import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
 
-MAX_UPLOAD_BYTES = 45 * 1024 * 1024
 PREVIEW_SIDE = 1600
 
 
@@ -26,6 +24,10 @@ class Db:
     def heartbeat(self, hostname: str, status: str, details: dict) -> None:
         self.client.table("worker_heartbeats").upsert({"worker_id": config.WORKER_ID, "hostname": hostname, "status": status,
                                                        "last_seen_at": now(), "details": details}).execute()
+
+    def publish_media(self, media: dict) -> None:
+        """Endereço e senha do servidor de vídeos do PC (só o dono do estúdio lê; os vídeos em si não saem do PC)."""
+        self.client.table("worker_media").upsert({"worker_id": config.WORKER_ID, **media, "updated_at": now()}).execute()
 
     def requeue_stale(self) -> int:
         """Tarefas que ficaram 'running' quando o worker foi interrompido voltam para a fila."""
@@ -56,6 +58,10 @@ class Db:
     def stage(self, stage_id: str) -> dict:
         return self.client.table("project_stages").select("*").eq("id", stage_id).single().execute().data
 
+    def stage_payload(self, project_id: str, stage_key: str) -> dict:
+        rows = self.client.table("project_stages").select("payload").eq("project_id", project_id).eq("stage_key", stage_key).limit(1).execute().data or []
+        return (rows[0].get("payload") if rows else None) or {}
+
     def update_stage(self, stage_id: str, *, patch: dict | None = None, remove: tuple[str, ...] = (), **fields) -> None:
         """Atualiza colunas e mescla `patch` no payload da etapa."""
         if patch is not None or remove:
@@ -77,6 +83,30 @@ class Db:
 
     def upload(self, path: str, data: bytes, content_type: str) -> None:
         self.client.storage.from_(config.STORAGE_BUCKET).upload(path, data, {"content-type": content_type, "upsert": "true"})
+
+    # --- resgate de projetos (app.recover) ----------------------------------------
+    def exists(self, table: str, row_id: str) -> bool:
+        return bool(self.client.table(table).select("id").eq("id", row_id).limit(1).execute().data)
+
+    def insert_rows(self, table: str, rows: list[dict]) -> list[dict]:
+        return self.client.table(table).insert(rows).execute().data or []
+
+    def delete_project(self, project_id: str) -> None:
+        self.client.table("projects").delete().eq("id", project_id).execute()
+
+    def studio_owner(self, who: str | None = None) -> str:
+        """Dono do estúdio. Sem dono ainda (banco novo), usa a única conta do painel, ou a indicada em `who` (e-mail ou id)."""
+        rows = self.client.table("studio_owner").select("user_id").execute().data or []
+        if rows:
+            return rows[0]["user_id"]
+        users = self.client.auth.admin.list_users()
+        users = users if isinstance(users, list) else getattr(users, "users", [])
+        if who:
+            users = [u for u in users if who.casefold() in (str(u.id).casefold(), str(getattr(u, "email", "") or "").casefold())]
+        if len(users) != 1:
+            raise SystemExit(f"Encontrei {len(users)} contas no painel; indique a sua com --owner <e-mail ou id>." if users else "Nenhuma conta no painel: entre nele uma vez e rode de novo.")
+        self.client.table("studio_owner").insert({"user_id": str(users[0].id)}).execute()
+        return str(users[0].id)
 
 
 class SupabaseSink:
@@ -110,7 +140,7 @@ class SupabaseSink:
 
     def file(self, stage_key: str, item_key: str, name: str, path: Path, kind: str, meta: dict | None = None) -> None:
         stat = path.stat()
-        fingerprint = f"{stat.st_mtime_ns}:{stat.st_size}"
+        fingerprint = f"{stat.st_mtime_ns}:{stat.st_size}" + (":local" if kind == "video" else "")
         if self._cache.get(item_key) == fingerprint:
             return
         row = self._row(item_key, name, path, kind)
@@ -118,11 +148,7 @@ class SupabaseSink:
         rel = row["local_relative_path"]
         storage_path = None
         if kind == "video":
-            if stat.st_size <= MAX_UPLOAD_BYTES:
-                storage_path = f"{self.project['id']}/{rel}"
-                self.db.upload(storage_path, path.read_bytes(), mimetypes.guess_type(path.name)[0] or "video/mp4")
-            else:
-                content["note"] = "Arquivo grande demais para prévia remota; disponível no PC do worker."
+            content["local"] = True   # o vídeo fica só na pasta do projeto; o painel o toca pelo servidor local do worker
         else:
             data, size = _preview(path)
             content.setdefault("width", size[0])

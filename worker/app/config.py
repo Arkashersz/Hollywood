@@ -34,6 +34,11 @@ POLL_SECONDS = _int("POLL_SECONDS", 5)
 
 RUNTIME_DIR = _path("RUNTIME_DIR", REPO_DIR / "runtime")
 PROJECTS_DIR = RUNTIME_DIR / "projects"
+WORKFLOW_DIR = _path("WORKFLOW_DIR", WORKER_DIR / "workflow")   # workflow-base.md e regras-aprendidas.md (editáveis), lidos a cada geração de cenas
+LOCAL_MEDIA_PORT = _int("LOCAL_MEDIA_PORT", 8765)   # vídeos tocados direto da pasta, sem ir ao Supabase
+MEDIA_TUNNEL = (os.getenv("MEDIA_TUNNEL", "auto") or "auto").lower()   # auto = abre o túnel se o cloudflared existir; off = só neste PC
+CLOUDFLARED_PATH = os.getenv("CLOUDFLARED_PATH", "")
+MEDIA_PUBLIC_URL = os.getenv("MEDIA_PUBLIC_URL", "").rstrip("/")   # endereço fixo de outro túnel (Tailscale Funnel etc.); dispensa o cloudflared
 
 # Navegador: um Chrome comum, com perfil dedicado, onde o usuário faz login manualmente.
 BROWSER_PROFILE_DIR = _path("BROWSER_PROFILE_DIR", WORKER_DIR / "browser-profiles" / "studio")

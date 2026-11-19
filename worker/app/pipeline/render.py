@@ -55,14 +55,14 @@ def identification(evidence: dict) -> str:
 def full_body_prompt(bible: dict, ch: dict) -> str:
     return (f"{bible['style_block']}\n\nCharacter: {ch['fixed_description']}\n\n"
             "Full-body character reference image: neutral standing pose, front view, the whole figure visible from head to feet, "
-            "plain light-gray seamless background, no other characters, no text. Vertical 2:3 portrait format.")
+            "plain light-gray seamless background, no other characters, no text. Vertical 9:16 format.")
 
 
 def sheet_prompt(bible: dict, ch: dict, with_reference: bool = True) -> str:
     expressions = ", ".join(ch["expressions"]) or "neutral, happy, sad, angry, surprised, afraid"
     details = ", ".join(ch["details"]) or "outfit and accessories"
     return (f"{bible['style_block']}\n\nCharacter: {ch['fixed_description']}\n\n"
-            "Character reference sheet in landscape 16:9 format. "
+            "Character reference sheet in vertical 9:16 portrait format, laid out as clean stacked rows. "
             + ("Use the attached image as the exact identity reference: same face, body, outfit and colors in every view. " if with_reference else
                "Design this character exactly as described above, with the same face, body, outfit, colors and accessories in every view. ")
             +
@@ -79,6 +79,13 @@ def scene_prompt(bible: dict, plan: dict, scene: dict) -> str:
     chars = {c["name"]: c for c in bible["characters"]}
     env = next(e for e in plan["environments"] if e["name"] == scene["environment"])
     cast = "\n".join(f"- {n}: {chars[n]['fixed_description']}" for n in scene["characters"]) or "- none"
+    if scene.get("pre_action"):   # workflow de animação: a foto do segundo zero, antes de a ação começar
+        return (f"{bible['style_block']}\n\nInitial still frame (second zero) for an image-to-video clip. Vertical 9:16 format.\n\n"
+                f"Static pre-action image: {scene['composition']}\n\n"
+                f"Characters (match the attached character sheets exactly, same outfit and colors):\n{cast}\n\n"
+                f"Environment (match the attached environment image): {env['fixed_description']}\n\n"
+                "Show only the exact moment before the action starts: zero motion, pre-action pose, no particles, no effects, no transformation yet, "
+                "no motion blur, no subtitles, no captions, no text overlays.")
     return (f"{bible['style_block']}\n\nInitial still frame for an image-to-video clip. Vertical 9:16 format.\n\n"
             f"Composition: {scene['composition']}\n\n"
             f"Characters (match the attached character sheets exactly):\n{cast}\n\n"
@@ -93,7 +100,13 @@ def clip_prompt(bible: dict, clip: dict) -> str:
     cast = [chars[n] for n in clip.get("cast") or [] if n in chars and not chars[n]["voice_only"]]
     look = ("\n\nCharacter consistency (each character must look EXACTLY like the attached reference images in every frame: same face, hair, outfit, colors and accessories "
             "such as glasses or hats; change nothing unless the action above says so):\n" + "\n".join(f"- {c['name']}: {c['fixed_description']}" for c in cast)) if cast else ""
-    return f"{clip['prompt']}{voice_block}{look}\n\nDuration: {clip['duration_s']} seconds. Vertical 9:16."
+    lines = clip.get("lines") or []   # workflow de animação: falas na ordem, com nome e gênero de quem fala
+    talk = ""
+    if lines:
+        spoken = "\n".join(f"- {l['speaker']}{' (' + l['gender_en'] + ')' if l.get('gender_en') else ''}: \"{l['text']}\"" for l in lines)
+        talk = f"\n\nDialogue (speak in {clip.get('language_en') or 'the original language'}, each line exactly as written, in this order):\n{spoken}"
+    action = f"Animation & Camera Action: {clip['prompt']}" if clip.get("language_en") else clip["prompt"]
+    return f"{action}{talk}{voice_block}{look}\n\nDuration: {clip['duration_s']} seconds. Vertical 9:16."
 
 
 # ---------------------------------------------------------------------------
@@ -139,14 +152,14 @@ def doc04(bible: dict, direct: bool = False) -> str:
                   "**Nunca pode mudar:**", _bullets(ch["never_change_pt"])]
         if not direct:
             parts += [f"**Prompt da imagem de corpo inteiro** → `{body_path(ch).as_posix()}`", _code(full_body_prompt(bible, ch))]
-    parts.append("## O que você decide\nAo aprovar, o worker gera no ChatGPT direto a folha 16:9 de cada personagem (Documento 05), sem imagem de corpo inteiro antes." if direct else
+    parts.append("## O que você decide\nAo aprovar, o worker gera no ChatGPT direto a folha 9:16 de cada personagem (Documento 05), sem imagem de corpo inteiro antes." if direct else
                  "## O que você decide\nAo aprovar, o worker gera no ChatGPT uma imagem de corpo inteiro por personagem, com exatamente os prompts acima.")
     return "\n\n".join(p for p in parts if p)
 
 
 def doc05(bible: dict, direct: bool = False) -> str:
-    parts = ["Uma folha 16:9 por personagem, gerada direto da descrição fixa (sem imagem de corpo inteiro antes)." if direct else
-             "Uma folha 16:9 por personagem, gerada a partir da imagem de corpo inteiro aprovada (anexada como referência)."]
+    parts = ["Uma folha 9:16 por personagem, gerada direto da descrição fixa (sem imagem de corpo inteiro antes)." if direct else
+             "Uma folha 9:16 por personagem, gerada a partir da imagem de corpo inteiro aprovada (anexada como referência)."]
     for ch in visible(bible):
         parts += [f"## {ch['name']}", (f"**Arquivo:** `{sheet_path(ch).as_posix()}`" if direct else f"**Referência anexada:** `{body_path(ch).as_posix()}`  \n**Arquivo:** `{sheet_path(ch).as_posix()}`"),
                   "**A folha cobre:** corpo inteiro (frente e perfil), rosto em close, expressões e detalhes.",
@@ -173,7 +186,7 @@ def doc07(bible: dict, plan: dict) -> str:
     story_rows = "\n".join(f"| {s['id']} | {_cell(s['environment'])} | {_cell(', '.join(s['characters']) or 'nenhum')} | {_cell(s['explanation_pt'])} | `{scene_path(s['id']).as_posix()}` |"
                            for s in plan["scenes"])
     parts = [
-        "## 1. Character Reference", "Fichas, descrições fixas e folhas 16:9 aprovadas: Documentos 04 e 05. As folhas são anexadas como referência em toda imagem de cena.",
+        "## 1. Character Reference", "Fichas, descrições fixas e folhas 9:16 aprovadas: Documentos 04 e 05. As folhas são anexadas como referência em toda imagem de cena.",
         "## 2. Environment / Set Design", f"| Ambiente | Descrição | Arquivo |\n| --- | --- | --- |\n{env_rows}",
     ]
     for e in plan["environments"]:
@@ -207,7 +220,7 @@ def image_catalog(bible: dict, plan: dict, direct: bool = False) -> dict[str, di
     for e in plan["environments"]:
         out[f"ambiente-{e['slug']}"] = {"label": f"Ambiente {e['name']}", "path": env_path(e)}
     for c in visible(bible):
-        out[f"folha-{c['slug']}"] = {"label": f"Folha 16:9 de {c['name']}", "path": sheet_path(c)}
+        out[f"folha-{c['slug']}"] = {"label": f"Folha 9:16 de {c['name']}", "path": sheet_path(c)}
         if not direct:
             out[f"personagem-{c['slug']}"] = {"label": f"{c['name']} de corpo inteiro", "path": body_path(c)}
     return out

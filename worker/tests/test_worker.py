@@ -157,7 +157,7 @@ def test_unknown_job_and_bad_source(world):
         media.fetch_source("ftp://x/y.mp4", config.PROJECTS_DIR / "z")
 
 
-def test_worker_runs_up_to_three_projects_at_once_and_never_two_jobs_of_the_same_project(monkeypatch):
+def test_worker_runs_up_to_three_projects_at_once_and_never_two_jobs_of_the_same_project(monkeypatch, tmp_path):
     from app import config, main
 
     class QueueDb:
@@ -202,6 +202,9 @@ def test_worker_runs_up_to_three_projects_at_once_and_never_two_jobs_of_the_same
     monkeypatch.setattr(config, "MAX_PARALLEL_JOBS", 3)
     monkeypatch.setattr(config, "BRAIN", "claude")
     monkeypatch.setattr(config, "POLL_SECONDS", 0.05)
+    monkeypatch.setattr(config, "MEDIA_TUNNEL", "off")   # o teste não abre túnel de verdade
+    monkeypatch.setattr(config, "LOCAL_MEDIA_PORT", 0)
+    monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path)
 
     async def scenario():
         task = asyncio.create_task(main.main())
@@ -215,3 +218,89 @@ def test_worker_runs_up_to_three_projects_at_once_and_never_two_jobs_of_the_same
     assert peak[0] == 3, f"pico de {peak[0]} tarefas ao mesmo tempo"
     assert [e for e in order if e[0] == "start"].__len__() == 5, "as 5 tarefas rodaram"
     assert "j2" in db.released or order.index(("start", "j2")) > order.index(("end", "j0")), "o 2º job do p1 esperou o 1º"
+
+
+def test_local_media_server_serves_only_project_videos_with_range(tmp_path):
+    import threading, urllib.request, urllib.error
+    from app import media_server
+    pid = "11111111-2222-3333-4444-555555555555"
+    root = tmp_path / pid
+    (root / "videos").mkdir(parents=True)
+    (root / "videos" / "clip.mp4").write_bytes(bytes(range(100)))
+    (root / "dados.json").write_text("{}")
+    server = media_server.start(tmp_path, 0)
+    port = server.server_address[1]
+    try:
+        base = f"http://127.0.0.1:{port}/v/{pid}"
+        assert urllib.request.urlopen(f"{base}/videos/clip.mp4").read() == bytes(range(100))
+        part = urllib.request.urlopen(urllib.request.Request(f"{base}/videos/clip.mp4", headers={"Range": "bytes=10-19"}))
+        assert part.status == 206 and part.read() == bytes(range(10, 20))
+        for bad in (f"{base}/dados.json", f"{base}/../../etc/passwd", f"{base}/%2e%2e/x.mp4", f"http://127.0.0.1:{port}/v/99999999-0000/videos/clip.mp4"):
+            try:
+                urllib.request.urlopen(bad)
+                raise AssertionError(bad)
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 404
+    finally:
+        server.shutdown()
+
+
+def test_media_server_asks_for_the_studio_password_when_it_has_one(tmp_path):
+    import urllib.request, urllib.error
+    from app import media_server
+    pid = "11111111-2222-3333-4444-555555555555"
+    (tmp_path / pid / "videos").mkdir(parents=True)
+    (tmp_path / pid / "videos" / "clip.mp4").write_bytes(bytes(range(50)))
+    token = media_server.load_token(tmp_path / "runtime")
+    assert len(token) >= 32 and media_server.load_token(tmp_path / "runtime") == token, "a senha é criada uma vez e reaproveitada"
+    server = media_server.start(tmp_path, 0, token)
+    base = f"http://127.0.0.1:{server.server_address[1]}/v/{pid}/videos/clip.mp4"
+    try:
+        for bad in (base, f"{base}?k=errada", f"{base}?k="):
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                urllib.request.urlopen(bad)
+            assert exc.value.code == 403
+        assert urllib.request.urlopen(f"{base}?k={token}").read() == bytes(range(50))
+        part = urllib.request.urlopen(urllib.request.Request(f"{base}?k={token}", headers={"Range": "bytes=5-9"}))
+        assert part.status == 206 and part.read() == bytes(range(5, 10))
+    finally:
+        server.shutdown()
+
+
+def test_tunnel_reads_the_public_address_and_comes_back_after_a_crash(tmp_path):
+    import sys, time
+    from app import tunnel
+    assert tunnel.parse_url("2026 INF |  https://Rapid-Fox-12.trycloudflare.com  |") == "https://rapid-fox-12.trycloudflare.com"
+    assert tunnel.parse_url("Requesting new quick Tunnel on trycloudflare.com...") is None
+    assert tunnel.command("cf.exe", 8765)[-2:] == ["--url", "http://127.0.0.1:8765"]
+
+    runs = tmp_path / "runs.txt"
+    script = (f"import pathlib,time; p=pathlib.Path(r'{runs}'); n=len(p.read_text().split()) if p.exists() else 0; "
+              "p.write_text(p.read_text()+'x ' if p.exists() else 'x '); "
+              "print(f'| https://run{n}.trycloudflare.com |', flush=True); time.sleep(0.4 if n == 0 else 30)")
+    tun = tunnel.Tunnel([sys.executable, "-c", script], retry_seconds=0.2).start()
+    try:
+        deadline = time.time() + 15
+        while time.time() < deadline and tun.url != "https://run0.trycloudflare.com":
+            time.sleep(0.05)
+        assert tun.url == "https://run0.trycloudflare.com"
+        while time.time() < deadline and tun.url != "https://run1.trycloudflare.com":   # o processo morreu e foi reaberto
+            time.sleep(0.05)
+        assert tun.url == "https://run1.trycloudflare.com"
+        media = tunnel.RemoteMedia("senha", "http://127.0.0.1:8765", tunnel=tun)
+        assert media.snapshot() == {"local_url": "http://127.0.0.1:8765", "public_url": "https://run1.trycloudflare.com", "token": "senha"}
+        assert tunnel.RemoteMedia("senha", None, "https://fixo.example.com").public_url == "https://fixo.example.com"
+    finally:
+        tun.stop()
+    assert tun.url is None
+
+
+def test_find_cloudflared_uses_the_configured_path_first(tmp_path, monkeypatch):
+    from app import tunnel
+    exe = tmp_path / "cloudflared.exe"
+    exe.write_bytes(b"")
+    assert tunnel.find_cloudflared(str(exe)) == str(exe)
+    monkeypatch.setattr(tunnel.shutil, "which", lambda name: None)
+    for var in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
+        monkeypatch.setenv(var, str(tmp_path / "vazio"))
+    assert tunnel.find_cloudflared("") is None

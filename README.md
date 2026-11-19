@@ -21,7 +21,7 @@ Quem faz o quê:
 | 2 | Roteiro em alemão | Claude | Documento 03 |
 | 3 | Personagens e vozes | Claude | Documentos 04, 05 e 06 |
 | 4 | Imagens dos personagens | ChatGPT | Corpo inteiro de cada personagem |
-| 5 | Folhas 16:9 | ChatGPT | Uma folha por personagem |
+| 5 | Folhas 9:16 | ChatGPT | Uma folha por personagem |
 | 6 | Ambientes e cenas | Claude | Documento 07 (oito áreas) |
 | 7 | Imagens de ambientes e cenas | ChatGPT | Ambientes e imagem-base de cada cena |
 | 8 | Prompts de vídeo, edição e publicação | Claude | Documentos 08, 09 e 10 |
@@ -60,6 +60,10 @@ Na primeira vez, crie a conta no painel, cole o link do TikTok (ou o caminho de 
 Os arquivos originais ficam em `runtime/projects/<id do projeto>/` (documentos `.md`, `imagens/`, `videos/`). O Supabase guarda os textos e prévias leves.
 
 ## Vídeos no Grok (feito pelo Python, sem o Claude)
+
+**Os vídeos não vão para o Supabase** (economiza tráfego de saída): ficam só na pasta do projeto, no PC. O painel os busca lá quando você dá play, pelo servidor de vídeos do worker (`127.0.0.1:8765`, muda com `LOCAL_MEDIA_PORT`). Imagens continuam com prévia leve no Supabase.
+
+**Ver os vídeos fora de casa (celular, site, aplicativo):** o worker abre um túnel HTTPS do Cloudflare (`cloudflared`, sem conta) até esse servidor e publica o endereço atual na tabela `worker_media`, que só o dono do estúdio lê. O painel usa o endereço local quando está aberto no próprio PC e o do túnel em qualquer outro lugar. O vídeo passa direto do PC para o seu aparelho, só enquanto você assiste; o PC e o worker precisam estar ligados (senão o painel avisa). Cada pedido exige uma senha (`?k=`) guardada em `runtime/media-token.txt` e entregue só ao dono logado; sem ela o servidor responde 403. Para ligar: `winget install Cloudflare.cloudflared`, reinicie o worker e aplique `0018_worker_media.sql` e `0019_is_studio_owner.sql`. O endereço do túnel muda a cada abertura do worker (o painel pega o novo sozinho). Para um endereço fixo (Tailscale Funnel, Cloudflare Tunnel nomeado), ponha-o em `MEDIA_PUBLIC_URL` no `worker/.env` e, se não for `*.trycloudflare.com`, inclua o domínio em `media-src` no `vercel.json`. `MEDIA_TUNNEL=off` desliga o túnel (vídeos só no PC).
 
 O Claude só escreve o prompt e a duração de cada clipe. Quem opera o Grok é o Python: escolhe **720p** (sempre), a duração (**6, 10 ou 15 s**, a menor que comporta o clipe), a proporção vertical 9:16, confere na tela que as opções ficaram aplicadas antes de enviar e só baixa o vídeo **novo** que nasceu desse envio, com a duração e a resolução pedidas (vídeos antigos da página ou fora do pedido são ignorados; se nenhum servir, a etapa para e explica). Ajustes em `worker/.env`: `GROK_RESOLUTION`, `GROK_ASPECT` (vazio = não mexer), `GROK_MAX_CLIP_SECONDS`. Nos prompts importados, use `Duração: 10` no bloco do clipe; sem isso vale o que o prompt cita ("10 seconds") ou 6 s.
 
@@ -145,6 +149,41 @@ Ao criar o projeto você escolhe o modelo do Claude (roteiro, personagens, promp
 
 Na aba **Tenho uma ideia de história** você escreve a ideia (pode ser uma frase), define a **duração do vídeo** e a **quantidade mínima de cenas**. Não há link: o Claude escreve o briefing, o roteiro em alemão, os personagens, as cenas e os prompts, no mesmo padrão dos outros projetos (gancho de 5 s impactantes no início, final com cliffhanger e convite para a parte 2, consistência de personagens). O worker confere o resultado: o plano de cenas precisa ter no mínimo as cenas pedidas e a soma dos clipes precisa ficar entre a duração pedida e +6 s (os clipes do Grok só têm 6, 10 ou 15 s); se não fechar, o Claude é chamado de novo. Exige a migração `0015_story_idea.sql`.
 
+## Fábrica de roteiros + workflow de animação (9:16)
+
+É a aba padrão ao criar um projeto (**Fábrica de roteiros**) e segue os dois materiais de apoio do Grind Club: a Fábrica cria a história, a bíblia de personagens e a de ambientes; o workflow transforma isso em cenas prontas para gerar. **Tudo é vertical 9:16**: folhas de personagem, ambientes, imagens de cena e vídeos.
+
+| # | Etapa | Quem faz | Entrega |
+| --- | --- | --- | --- |
+| 1 | Referências e aprendizados (Fases 1–2) | Python + Claude | Docs F1–F2: análise individual de até 5 referências e matriz de aprendizados |
+| 2 | Cinco propostas originais (Fase 3) | Claude | Doc F3; você escolhe qual desenvolver (botões na etapa) |
+| 3 | Roteiro completo (Fase 4) | Claude | Doc F4: mínimo de cenas, soma de tempo e fala conferidas contra o tempo de cada cena |
+| 4 | Personagens e ambientes (Fases 5–6) | Claude | Doc F5: metadados, regras, personagens, ambientes, objetos e matriz de continuidade. **A Fábrica termina aqui** |
+| 5 | Workflow de animação · cenas | Claude | Doc F6: por cena, imagem de segundo zero (pre-action), Animation & Camera Action, diálogos e duração (máx. 10 s) |
+| 6 | Folhas 9:16 | ChatGPT | Uma folha por personagem |
+| 7 | Imagens de ambientes e cenas 9:16 | ChatGPT | Ambientes e imagem de segundo zero de cada cena |
+| 8 | Vídeos no Grok 9:16 | Grok | Um clipe por cena (piloto primeiro, depois o restante) |
+
+- **Perfil de produção (Fase 0)** é o formulário de criação: nicho (padrão frutinhas animadas), idioma (padrão português do Brasil), público, estilo visual (os 12 estilos do material ou um seu), duração total (padrão 90–120 s), mínimo de cenas (12), duração por cena (6–10 s), áudio e restrições. O worker recusa um perfil impossível (ex.: 12 cenas de 6 s não cabem em 60 s).
+- **Referências**: de 0 a 5 links ou `.mp4`. O Claude vê os quadros de cada uma (gancho, fecho e linha do tempo) e a transcrição; o que não puder ser baixado fica marcado como “não analisado”, nunca inventado. Com menos de 5 o painel avisa e você decide se segue.
+- **Tempo realista**: a fala é estimada a 2,7 palavras por segundo e precisa caber na cena; fala longa vira dois clipes (`7a`, `7b`). O limite é de 10 s por clipe e o Grok só gera 6 ou 10 s, então o excesso de cada clipe se corta na edição (o documento F6 mostra o tempo planejado × o gerado).
+- **Imagem no segundo zero**: o prompt da imagem descreve só a pose de preparação; o worker acrescenta `zero motion, pre-action pose, no particles, no transformation yet`. Movimento, efeitos e transformação ficam na *Animation & Camera Action*, e as falas entram no prompt do clipe como `Banana (female): "..."`, na ordem em que são ditas.
+- **Quatro camadas do sistema**: bíblia visual (Doc F5) → workflow (`worker/workflow/workflow-base.md`) → prompt da cena (Doc F6) → correções acumuladas (`worker/workflow/regras-aprendidas.md`). Os dois arquivos do worker são lidos a cada geração de cenas e podem ser editados: se a IA errou uma vez, ajuste a cena; se errou duas ou três vezes igual, escreva a regra em `regras-aprendidas.md`. Para outro estilo basta escolher o estilo no perfil; o resto não muda.
+- Os modos antigos (link, cópia fiel, ideia de história, parte 2 e “Já tenho os prompts”) continuam disponíveis nas outras abas, mas também passaram a gerar tudo em 9:16.
+
+Exige a migração `0017_factory_mode.sql`.
+
 ## Folhas direto, sem imagem de corpo inteiro
 
-Projetos novos (link, cópia fiel, ideia de história e parte 2) não têm mais a etapa "Imagens dos personagens": o ChatGPT gera direto a **folha 16:9** de cada personagem, a partir da descrição fixa. São 1 imagem por personagem em vez de 2, o que poupa a cota do ChatGPT. Projetos antigos continuam com as 9 etapas, e o fluxo "Já tenho os prompts" não mudou. Exige a migração `0016_direct_sheets.sql`.
+Projetos novos (link, cópia fiel, ideia de história e parte 2) não têm mais a etapa "Imagens dos personagens": o ChatGPT gera direto a **folha 9:16** de cada personagem, a partir da descrição fixa. São 1 imagem por personagem em vez de 2, o que poupa a cota do ChatGPT. Projetos antigos continuam com as 9 etapas, e o fluxo "Já tenho os prompts" não mudou. Exige a migração `0016_direct_sheets.sql`.
+
+## Resgatar projetos depois de trocar o banco
+Trocar o projeto do Supabase apaga os projetos do painel, mas as pastas em `runtime/projects` (documentos, JSONs, imagens e vídeos) continuam no PC. Para recriá-los no banco novo, com o mesmo id da pasta, rode em `worker` (precisa do `.env` apontando para o banco novo e das migrações aplicadas):
+
+```powershell
+.\.venv\Scripts\python.exe -m app.recover                      # só lista o que seria recriado
+.\.venv\Scripts\python.exe -m app.recover --apply              # recria
+.\.venv\Scripts\python.exe -m app.recover --apply --only "Nome" # só os projetos cujo título contém o texto
+.\.venv\Scripts\python.exe -m app.recover --apply --replace    # recria de novo os que já existem
+```
+O status das etapas não fica na pasta, então é deduzido: etapas antes da última com resultado voltam **aprovadas**; a última completa volta **em revisão** (a próxima só começa quando você aprovar); a última incompleta volta **parada** com "Tentar novamente", que gera só o que falta. O resgate nunca chama Claude, ChatGPT nem Grok. O que a pasta não guarda (a ideia original de um projeto de história, o link, se estiver só o MP4, o plano de prompts importado) é reconstruído do que existe e avisado na listagem. O cache `dados/publicados.json` do banco antigo é guardado como `publicados.antigo.json`.

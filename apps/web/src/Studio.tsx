@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import {
   Activity, AlertTriangle, Check, ChevronRight, Clapperboard, Cloud, Film, FolderOpen, Link2, LogOut, MessageSquareWarning,
@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { buildPlan, type PlanKey } from './importPlan';
-import { AGENT_LABEL, FALLBACK_ICON, STAGE_META, STATUS_LABEL, timeAgo, type Artifact, type EventRow, type Heartbeat, type Project, type Stage } from './types';
+import { AGENT_LABEL, FALLBACK_ICON, STAGE_META, STATUS_LABEL, timeAgo, type Artifact, type EventRow, type Heartbeat, type MediaAccess, type Project, type Stage } from './types';
 
 type View = 'projects' | 'activity' | 'integrations';
 const BUCKET = 'artifacts';
@@ -26,6 +26,7 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [heartbeat, setHeartbeat] = useState<Heartbeat | null>(null);
+  const [media, setMedia] = useState<MediaAccess | null>(null);
   const [urls, setUrls] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState('');
   const [live, setLive] = useState(false);
@@ -35,16 +36,18 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
   selectedRef.current = selectedId;
 
   const refresh = useCallback(async () => {
-    const [p, h, all] = await Promise.all([
+    const [p, h, all, m] = await Promise.all([
       db.from('projects').select('*').order('updated_at', { ascending: false }),
       db.from('worker_heartbeats').select('*').order('last_seen_at', { ascending: false }).limit(1),
       db.from('project_stages').select('*').order('stage_order'),
+      db.from('worker_media').select('*').limit(1),
     ]);
     if (p.error) { setNotice(`Sem acesso ao Supabase: ${p.error.message}`); return; }
     const list = (p.data ?? []) as Project[];
     setProjects(list);
     setAllStages((all.data ?? []) as Stage[]);
     setHeartbeat(((h.data ?? [])[0] as Heartbeat) ?? null);
+    setMedia(m.error ? null : ((m.data ?? [])[0] as MediaAccess) ?? null);   // endereço e senha do servidor de vídeos do PC
     const current = selectedRef.current && list.some((x) => x.id === selectedRef.current) ? selectedRef.current : list[0]?.id ?? null;
     if (current !== selectedRef.current) setSelectedId(current);
 
@@ -143,6 +146,7 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
   const initials = (session.user.email ?? 'TS').slice(0, 2).toUpperCase();
 
   return (
+    <MediaContext.Provider value={{ access: media, online: workerOnline, reload: refresh }}>
     <div className="shell">
       <aside className="sidebar">
         <div className="brand"><div className="brandmark"><Clapperboard size={21} /></div><div><b>TIKTOK STUDIO</b><small>CREATIVE WORKFLOW</small></div></div>
@@ -184,6 +188,7 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
         </section>
       </main>
     </div>
+    </MediaContext.Provider>
   );
 }
 
@@ -210,7 +215,8 @@ function ProjectsView(props: {
   const [notifyAsked, setNotifyAsked] = useState(() => !('Notification' in window) || Notification.permission !== 'default');
   const [source, setSource] = useState('');
   const [title, setTitle] = useState('');
-  const [mode, setMode] = useState<'link' | 'story' | 'prompts'>('link');
+  const [mode, setMode] = useState<'factory' | 'link' | 'story' | 'prompts'>('factory');
+  const [fx, setFx] = useState<FactoryForm>(FACTORY_DEFAULTS);
   const [idea, setIdea] = useState('');
   const [seconds, setSeconds] = useState(60);
   const [minScenes, setMinScenes] = useState(8);
@@ -260,6 +266,19 @@ function ProjectsView(props: {
   const storyProblem = !idea.trim() ? '' : seconds < 15 || seconds > 300 ? 'A duração precisa ficar entre 15 e 300 segundos.'
     : minScenes < 1 || minScenes > 60 ? 'A quantidade mínima de cenas precisa ficar entre 1 e 60.'
     : minScenes * 6 > seconds + 10 ? `${minScenes} cenas de no mínimo 6 s passam de ${seconds} s. Aumente a duração ou reduza as cenas.` : '';
+  const factoryRefs = useMemo(() => fx.references.split(/\r?\n/).map((r) => r.trim()).filter(Boolean), [fx.references]);
+  const factoryProblem = fx.min_s < 15 || fx.min_s > 240 ? 'A duração mínima precisa ficar entre 15 e 240 segundos.'
+    : fx.max_s < fx.min_s || fx.max_s > 300 ? 'A duração máxima precisa ficar entre a mínima e 300 segundos.'
+    : fx.min_scenes < 1 || fx.min_scenes > 60 ? 'A quantidade mínima de cenas precisa ficar entre 1 e 60.'
+    : fx.scene_min_s < 1 || fx.scene_max_s < fx.scene_min_s || fx.scene_max_s > 10 ? 'A duração por cena precisa ficar entre 1 e 10 segundos (limite de 10 s por clipe).'
+    : fx.min_scenes * fx.scene_min_s > fx.max_s ? `${fx.min_scenes} cenas de no mínimo ${fx.scene_min_s} s somam ${fx.min_scenes * fx.scene_min_s} s, mais do que o máximo de ${fx.max_s} s. Reduza as cenas ou aumente a duração.`
+    : factoryRefs.length > 5 ? 'Informe no máximo 5 referências.' : '';
+  async function createFactory() {
+    if (factoryProblem) return;
+    if (await call('create_factory_project', { p_title: title, p_profile: { ...fx, references: factoryRefs }, p_model: model || null },
+      'Projeto criado na Fábrica de roteiros. A análise das referências começa assim que o worker estiver online; cada etapa para na sua aprovação.')) { setTitle(''); setFx((old) => ({ ...old, references: '' })); }
+  }
+
   async function createStory() {
     if (!idea.trim() || storyProblem) return;
     if (await call('create_story_project', { p_title: title, p_idea: idea, p_seconds: seconds, p_min_scenes: minScenes, p_model: model || null },
@@ -297,6 +316,7 @@ function ProjectsView(props: {
         </div>
       )}
       <div className="modetabs" role="tablist" aria-label="Como começar">
+        <button role="tab" aria-selected={mode === 'factory'} className={mode === 'factory' ? 'on' : ''} onClick={() => setMode('factory')}><Clapperboard size={15} /> Fábrica de roteiros</button>
         <button role="tab" aria-selected={mode === 'link'} className={mode === 'link' ? 'on' : ''} onClick={() => setMode('link')}><Link2 size={15} /> A partir de um vídeo do TikTok</button>
         <button role="tab" aria-selected={mode === 'story'} className={mode === 'story' ? 'on' : ''} onClick={() => setMode('story')}><Sparkles size={15} /> Tenho uma ideia de história</button>
         <button role="tab" aria-selected={mode === 'prompts'} className={mode === 'prompts' ? 'on' : ''} onClick={() => setMode('prompts')}><SkipForward size={15} /> Já tenho os prompts</button>
@@ -305,6 +325,44 @@ function ProjectsView(props: {
         <span><b>Modelo do Claude neste projeto</b><small>Escreve roteiro, personagens e prompts. Imagens e vídeos seguem ChatGPT e Grok.</small></span>
         <select value={model} onChange={(e) => setModel(e.target.value)}>{MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select>
       </label>
+      {mode === 'factory' && (
+        <div className="importbox factorybox">
+          <div className="importintro">
+            <b>Fábrica de roteiros → workflow de animação · tudo em 9:16</b>
+            <small>Você define o perfil e, se quiser, até 5 vídeos de referência. O Claude analisa e compara as referências, escreve cinco histórias originais (você escolhe uma), o roteiro completo e a bíblia de personagens e ambientes (a Fábrica termina aqui). No workflow de animação, cada cena sai com a imagem de segundo zero, a animação e câmera e os diálogos. Depois o ChatGPT gera as imagens e o Grok os vídeos de até 10 s. Cada etapa para na sua aprovação.</small>
+          </div>
+          <div className="factorygrid">
+            <label><b>Nicho</b><input value={fx.niche} onChange={(e) => setFx({ ...fx, niche: e.target.value })} /></label>
+            <label><b>Idioma das falas</b><select value={fx.language} onChange={(e) => setFx({ ...fx, language: e.target.value })}>{LANGUAGE_OPTIONS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label>
+            <label className="wide"><b>Público-alvo</b><input value={fx.audience} onChange={(e) => setFx({ ...fx, audience: e.target.value })} /></label>
+            <label><b>Estilo visual</b><select value={fx.style} onChange={(e) => setFx({ ...fx, style: e.target.value })}>{STYLE_OPTIONS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label>
+            {fx.style === 'custom' && <label><b>Descreva o estilo</b><input value={fx.style_custom} onChange={(e) => setFx({ ...fx, style_custom: e.target.value })} placeholder="Ex.: neon noir, luz azul, chuva" /></label>}
+            <label><b>Áudio</b><select value={fx.audio} onChange={(e) => setFx({ ...fx, audio: e.target.value })}><option value="dialogos">Diálogos</option><option value="narracao">Narração</option><option value="ambos">Narração e diálogos</option></select></label>
+          </div>
+          <div className="storynums">
+            <label><b>Duração total mín. (s)</b><input type="number" min={15} max={240} value={fx.min_s} onChange={(e) => setFx({ ...fx, min_s: Number(e.target.value) })} /></label>
+            <label><b>máx. (s)</b><input type="number" min={15} max={300} value={fx.max_s} onChange={(e) => setFx({ ...fx, max_s: Number(e.target.value) })} /></label>
+            <label><b>Mínimo de cenas</b><input type="number" min={1} max={60} value={fx.min_scenes} onChange={(e) => setFx({ ...fx, min_scenes: Number(e.target.value) })} /></label>
+            <label><b>Cena mín. (s)</b><input type="number" min={1} max={10} value={fx.scene_min_s} onChange={(e) => setFx({ ...fx, scene_min_s: Number(e.target.value) })} /></label>
+            <label><b>Cena máx. (s)</b><input type="number" min={1} max={10} value={fx.scene_max_s} onChange={(e) => setFx({ ...fx, scene_max_s: Number(e.target.value) })} /></label>
+            <small>Cada cena vira um clipe de no máximo 10 s (o Grok gera 6 ou 10 s; o excesso se corta na edição). A fala de cada cena é conferida contra o tempo dela.</small>
+          </div>
+          <label className="importfield">
+            <span><b>Referências (até 5)</b><small>Um link do TikTok ou caminho de .mp4 no PC do worker por linha. Opcional: sem referências, as propostas partem do perfil. Com menos de cinco, o painel avisa e você decide se segue.</small></span>
+            <textarea rows={4} value={fx.references} onChange={(e) => setFx({ ...fx, references: e.target.value })} spellCheck={false} placeholder={'https://www.tiktok.com/@.../video/...\nC:\\videos\\referencia2.mp4'} />
+            <small className="count">{factoryRefs.length} de 5 referência(s)</small>
+          </label>
+          <label className="importfield">
+            <span><b>Restrições</b><small>Figurino, personagens, temas e linguagem que o roteiro deve respeitar. Opcional.</small></span>
+            <textarea rows={2} value={fx.restrictions} onChange={(e) => setFx({ ...fx, restrictions: e.target.value })} maxLength={2000} />
+          </label>
+          <div className="importfoot storyfoot">
+            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Título (opcional)" />
+            <button className="primary" disabled={!!factoryProblem} onClick={createFactory}>Criar na Fábrica <ChevronRight size={16} /></button>
+          </div>
+          {factoryProblem && <div className="callout warn"><AlertTriangle size={15} /><span>{factoryProblem}</span></div>}
+        </div>
+      )}
       {mode === 'prompts' && (
         <div className="importbox">
           <div className="importintro">
@@ -394,7 +452,7 @@ function ProjectsView(props: {
             <div className="detail">
               <div className="detailtop">
                 {heroUrl && <img className="hero" src={heroUrl} alt="" />}
-                <div className="herotext"><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{(project.part ?? 1) > 1 ? `Parte ${project.part} · ` : ''}{project.mode === 'clone' ? 'Cópia fiel · ' : ''}{project.mode === 'story' ? `Ideia própria · ${project.target_seconds ?? '?'} s · mín. ${project.min_scenes ?? '?'} cenas` : (project.source_url ?? (project.parent_id ? 'continuação sem vídeo de referência' : ''))}</small>
+                <div className="herotext"><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{(project.part ?? 1) > 1 ? `Parte ${project.part} · ` : ''}{project.mode === 'clone' ? 'Cópia fiel · ' : ''}{project.mode === 'factory' ? `Fábrica · ${project.profile?.niche ?? ''} · ${project.profile?.min_s ?? '?'}–${project.profile?.max_s ?? '?'} s · mín. ${project.profile?.min_scenes ?? '?'} cenas · 9:16` : project.mode === 'story' ? `Ideia própria · ${project.target_seconds ?? '?'} s · mín. ${project.min_scenes ?? '?'} cenas` : (project.source_url ?? (project.parent_id ? 'continuação sem vídeo de referência' : ''))}</small>
                   <label className="modelinline">Modelo: <select value={project.model ?? ''} onChange={(e) => call('set_project_model', { p_project_id: project.id, p_model: e.target.value || null }, `Modelo do projeto: ${modelLabel(e.target.value)} (vale a partir da próxima tarefa).`)}>
                     {MODELS.some((m) => m.id === (project.model ?? '')) ? null : <option value={project.model ?? ''}>{modelLabel(project.model)}</option>}
                     {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select></label></div>
@@ -463,16 +521,24 @@ function ProjectsView(props: {
   );
 }
 
+type FactoryForm = { niche: string; language: string; audience: string; style: string; style_custom: string; min_s: number; max_s: number; min_scenes: number; scene_min_s: number; scene_max_s: number; audio: string; restrictions: string; references: string };
+const FACTORY_DEFAULTS: FactoryForm = { niche: 'Frutinhas animadas (novela das frutas)', language: 'pt-BR', audience: 'Público brasileiro de TikTok, todas as idades', style: '3d', style_custom: '', min_s: 90, max_s: 120, min_scenes: 12, scene_min_s: 6, scene_max_s: 10, audio: 'dialogos', restrictions: '', references: '' };
+const LANGUAGE_OPTIONS: [string, string][] = [['pt-BR', 'Português do Brasil'], ['en', 'Inglês'], ['es', 'Espanhol'], ['de', 'Alemão']];
+const STYLE_OPTIONS: [string, string][] = [['3d', '3D cinematográfico estilizado'], ['clay', 'Claymation / massinha'], ['anime', 'Anime cinematográfico'], ['cartoon2d', 'Cartoon 2D moderno'], ['cel3d', 'Cel shading 3D'],
+  ['storybook', 'Livro ilustrado / storybook'], ['watercolor', 'Aquarela'], ['comic', 'Comic / graphic novel'], ['lowpoly', 'Low-poly 3D'], ['toy', 'Miniaturas / toy world'], ['retro', 'Retro CGI'],
+  ['fantasy_real', 'Fotorealismo fantástico'], ['custom', 'Outro (descrever)']];
+
 const IMPORT_FIELDS: { key: PlanKey; label: string; agent: string; hint: string; placeholder: string }[] = [
   { key: 'character_images', label: 'Imagens dos personagens', agent: 'ChatGPT', hint: 'Corpo inteiro de cada personagem.', placeholder: '## Anna\nFull-body character on a plain background, ...' },
-  { key: 'character_sheets', label: 'Folhas 16:9 dos personagens', agent: 'ChatGPT', hint: 'Use Referências: para apontar a imagem do personagem.', placeholder: '## Folha da Anna\nReferências: Anna\n16:9 character sheet, ...' },
+  { key: 'character_sheets', label: 'Folhas 9:16 dos personagens', agent: 'ChatGPT', hint: 'Use Referências: para apontar a imagem do personagem.', placeholder: '## Folha da Anna\nReferências: Anna\n16:9 character sheet, ...' },
   { key: 'scene_images', label: 'Ambientes e cenas', agent: 'ChatGPT', hint: 'Imagem-base de cada cena; referencie personagens e ambientes pelo nome.', placeholder: '## Cozinha\nEmpty bright kitchen, ...\n\n## Cena 1\nReferências: Anna, Cozinha\nAnna at the table, ...' },
   { key: 'production', label: 'Vídeos', agent: 'Grok', hint: 'Um clipe por prompt, sempre em 720p. Imagem inicial: nome de uma imagem acima. Duração: 6, 10 ou 15 (o Python escolhe no Grok; sem isso usa o que o prompt cita, ou 6 s).', placeholder: '## Clipe 1\nImagem inicial: Cena 1\nAnna says "Hallo" ...' },
 ];
 
 const STAGE_TITLES: Record<string, string> = {
   analysis: 'Análise da referência', script: 'Roteiro', character_bible: 'Personagens e vozes', character_images: 'Imagens dos personagens',
-  character_sheets: 'Folhas dos personagens', visual_plan: 'Ambientes e cenas', scene_images: 'Imagens de cenas', video_prompts: 'Prompts de vídeo', production: 'Vídeos no Grok',
+  character_sheets: 'Folhas dos personagens', f_refs: 'Referências e aprendizados', f_proposals: 'Cinco propostas', f_script: 'Roteiro completo', f_bible: 'Personagens e ambientes',
+  f_workflow: 'Workflow de animação', visual_plan: 'Ambientes e cenas', scene_images: 'Imagens de cenas', video_prompts: 'Prompts de vídeo', production: 'Vídeos no Grok',
 };
 const STAGE_TITLE = (key: string) => STAGE_TITLES[key] ?? key;
 const GENERATION_STAGES = ['character_images', 'character_sheets', 'scene_images', 'production'];
@@ -535,6 +601,20 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
           <textarea rows={6} value={fixPrompt} onChange={(e) => setFixPrompt(e.target.value)} spellCheck={false} aria-label={`Prompt de ${failedItem.name}`} />
           <button disabled={busy || !fixPrompt.trim()} onClick={() => run('adjust_item', { p_stage_id: stage.id, p_item_key: failedItem.key, p_prompt: fixPrompt.trim() === failedItem.prompt.trim() ? null : fixPrompt, p_comment: null }, 'Ajuste enviado; o worker refaz a partir deste item.')}>
             <RotateCcw size={16} /> Salvar prompt e tentar de novo</button>
+        </div>
+      )}
+
+      {stage.stage_key === 'f_proposals' && reviewing && !!payload.proposals?.length && (
+        <div className="proposals">
+          <b>Qual história desenvolver?</b>
+          <small>Leia as cinco no documento abaixo e escolha. Sem escolha, o roteiro segue a recomendada (★). Depois aprove a etapa.</small>
+          <div className="proposalbtns">
+            {payload.proposals.map((p) => (
+              <button key={p.n} disabled={busy} className={`ghost ${(payload.chosen ?? payload.recommended) === p.n ? 'on' : ''}`} aria-pressed={(payload.chosen ?? payload.recommended) === p.n} title={p.hook}
+                onClick={() => run('choose_proposal', { p_stage_id: stage.id, p_number: p.n }, `História ${p.n} escolhida; aprove a etapa para desenvolvê-la.`)}>
+                <b>{p.n}{p.n === payload.recommended ? ' ★' : ''}</b> {p.title}</button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -642,18 +722,21 @@ function MediaCard({ item, stageId, url, canRegenerate, call, download, onOpen, 
   const original = item.content.prompt ?? '';
   const [prompt, setPrompt] = useState(original);
   useEffect(() => { if (!asking) setPrompt(original); }, [original, asking]);
+  const { access } = useContext(MediaContext);
+  const localUrl = localVideoUrl(item, access);
   const size = item.content.width && item.content.height ? `${item.content.width}×${item.content.height}` : item.content.duration ? `${item.content.duration} s` : '';
   return (
     <figure className={`mediacard ${item.artifact_type}${select?.on ? ' picked' : ''}`}>
       {select && <label className="pick"><input type="checkbox" checked={select.on} onChange={select.toggle} /> {select.on ? 'Selecionado' : 'Selecionar'}</label>}
       {item.artifact_type === 'video'
-        ? (url ? <video src={url} controls preload="metadata" /> : <div className="placeholder">{item.content.note ?? 'Prévia indisponível'}</div>)
+        ? (item.content.local ? <LocalVideo item={item} /> : url ? <video src={url} controls playsInline preload="metadata" /> : <div className="placeholder">{item.content.note ?? 'Prévia indisponível'}</div>)
         : (url ? <button type="button" className="imgbtn" onClick={onOpen} aria-label={`Ampliar ${item.name}`}><img src={url} alt={item.name} loading="lazy" /></button> : <div className="placeholder">Carregando prévia…</div>)}
       <figcaption>
         <b>{item.name}</b>
         <small>{[size, item.local_relative_path].filter(Boolean).join(' · ')}</small>
         {item.content.prompt && <details><summary>Prompt usado</summary><pre>{item.content.prompt}</pre></details>}
-        {item.storage_path && <button className="ghost small" onClick={() => download(item.storage_path as string, item.name.replace(/[^\w.-]+/g, '_') + (item.artifact_type === 'video' ? '.mp4' : '.jpg'))}><Download size={13} /> Baixar prévia</button>}
+        {localUrl ? <a className="ghost small" href={localUrl} download={item.name.replace(/[^\w.-]+/g, '_') + '.mp4'}><Download size={13} /> Baixar vídeo</a>
+          : item.storage_path && <button className="ghost small" onClick={() => download(item.storage_path as string, item.name.replace(/[^\w.-]+/g, '_') + (item.artifact_type === 'video' ? '.mp4' : '.jpg'))}><Download size={13} /> Baixar prévia</button>}
         {select?.on && <input className="picknote" value={select.note} onChange={(e) => select.setNote(e.target.value)} placeholder="O que está errado nesta (opcional)" aria-label={`Observação para ${item.name}`} />}
         {canRegenerate && !select && (asking ? (
           <div className="regen">
@@ -666,6 +749,38 @@ function MediaCard({ item, stageId, url, canRegenerate, call, download, onOpen, 
       </figcaption>
     </figure>
   );
+}
+
+// Vídeos não vão ao Supabase: ficam na pasta do projeto, no PC do worker. O painel os busca lá, quando você dá play:
+// no próprio PC pelo endereço local; fora de casa (celular, site, aplicativo) pelo túnel que o worker abre.
+// O endereço e a senha vêm da tabela worker_media, que só o dono lê.
+type MediaCtx = { access: MediaAccess | null; online: boolean; reload: () => void };
+const MediaContext = createContext<MediaCtx>({ access: null, online: false, reload: () => {} });
+const SAME_PC = ['127.0.0.1', 'localhost', '[::1]'].includes(window.location.hostname);
+
+function localVideoUrl(item: Artifact, access: MediaAccess | null): string | undefined {
+  if (item.artifact_type !== 'video' || !item.content.local || !item.local_relative_path || !access) return undefined;
+  const base = (SAME_PC ? access.local_url ?? access.public_url : access.public_url)?.replace(/\/$/, '');
+  if (!base) return undefined;
+  return `${base}/v/${item.project_id}/${item.local_relative_path.split('/').map(encodeURIComponent).join('/')}?k=${encodeURIComponent(access.token)}`;
+}
+
+function LocalVideo({ item }: { item: Artifact }) {
+  const { access, online, reload } = useContext(MediaContext);
+  const [failed, setFailed] = useState(false);
+  const [force, setForce] = useState(false);
+  const src = localVideoUrl(item, access);
+  useEffect(() => { setFailed(false); }, [src]);
+  if (src && (online || force) && !failed) {
+    return <video key={src} src={src} controls playsInline preload="metadata" onError={() => { setFailed(true); reload(); }} />;
+  }
+  const retry = () => { setForce(true); setFailed(false); reload(); };
+  let why: string;
+  if (!access) why = 'O vídeo está só no computador. O painel ainda não recebeu o endereço dele: ligue o worker (e aplique a migração 0018 no Supabase, se for a primeira vez).';
+  else if (!online && !force) why = 'O computador está desligado ou o worker parado. O vídeo está só nele: ligue o worker para assistir daqui.';
+  else if (!src) why = 'O vídeo está no computador, mas o acesso de fora de casa não está ligado. No PC, instale o cloudflared (winget install Cloudflare.cloudflared) e reinicie o worker.';
+  else why = 'Não consegui abrir o vídeo no computador (worker desligado, sem internet ou túnel reiniciando). Tente de novo em instantes.';
+  return <div className="placeholder videoerr" role="status"><span>{why}</span><button className="ghost small" onClick={retry}><RefreshCw size={13} /> Tentar de novo</button></div>;
 }
 
 function Lightbox({ items, index, urls, setIndex, download }: { items: Artifact[]; index: number; urls: Record<string, string>; setIndex: (i: number | null) => void; download: Download }) {

@@ -81,6 +81,8 @@ class FakeSupabase:
                "local_relative_path": f"imagens/personagens/personagem-{n.lower()}-corpo.png", "version": 1,
                "content": {"prompt": "Stylized 3D cartoon render.", "width": 1024, "height": 1536}, "updated_at": NOW} for n in ("Anna", "Hund")],
         ]
+        self.media = {"worker_id": "home-pc-01", "local_url": "http://127.0.0.1:8765", "public_url": "https://rapid-fox.trycloudflare.com", "token": "SENHA-DO-ESTUDIO"}
+        self.heartbeat_age = 0
         self.events = [{"id": 1, "project_id": self.project["id"], "stage_key": "character_images", "level": "info", "message": "Gerado: Anna · corpo inteiro.", "created_at": NOW},
                        {"id": 2, "project_id": self.project["id"], "stage_key": "character_images", "level": "warn", "message": "Parado (LIMIT_REACHED): limite.", "created_at": NOW}]
         buffer = io.BytesIO()
@@ -113,8 +115,10 @@ class FakeSupabase:
         if path.startswith("/rest/v1/"):
             table = path.rsplit("/", 1)[1]
             query = parse_qs(url.query)
+            if table == "worker_media":
+                return await reply([self.media] if self.media else [])
             rows = {"projects": [self.project], "project_stages": self.stages, "artifacts": self.artifacts, "events": self.events,
-                    "worker_heartbeats": [{"worker_id": "home-pc-01", "hostname": "CASA", "status": "online", "last_seen_at": datetime.now(timezone.utc).isoformat(),
+                    "worker_heartbeats": [{"worker_id": "home-pc-01", "hostname": "CASA", "status": "online", "last_seen_at": datetime.fromtimestamp(time.time() - self.heartbeat_age, timezone.utc).isoformat(),
                                            "details": {"job": {"stage_key": "character_images"}}}]}.get(table, [])
             if "project_id" in query:
                 assert query["project_id"] == [f"eq.{self.project['id']}"]
@@ -193,6 +197,7 @@ def test_review_flow_sends_the_right_decisions(panel):
         # a etapa em revisão abre sozinha, com as prévias carregadas do bucket privado
         panel_box = page.locator(".stagepanel")
         await panel_box.get_by_text("2 imagem(ns) de corpo inteiro.").wait_for()
+        await page.locator(".mediacard").last.scroll_into_view_if_needed()   # as prévias são "lazy": só carregam quando entram na tela
         await page.wait_for_function("document.querySelectorAll('.mediacard img').length === 2 && [...document.querySelectorAll('.mediacard img')].every(i => i.naturalWidth > 0)")
         assert await panel_box.get_by_text("Aviso de teste.").is_visible()
         assert "gerar 2 folhas 16:9 no ChatGPT" in await panel_box.locator(".approval small").inner_text()
@@ -245,6 +250,7 @@ def test_review_flow_sends_the_right_decisions(panel):
 
         # novo projeto
         await page.get_by_role("button", name="Projetos").click()
+        await page.get_by_role("tab", name="A partir de um vídeo do TikTok").click()
         create = page.get_by_role("button", name="Criar projeto")
         assert await create.is_disabled()
         await page.get_by_placeholder("https://www.tiktok.com/").fill("https://www.tiktok.com/@y/video/2")
@@ -346,3 +352,129 @@ def test_completed_project_offers_part_two_with_or_without_a_link(panel):
     calls = drive(panel, scenario)
     assert ("create_sequel", {"p_parent": "11111111-aaaa-bbbb-cccc-000000000001", "p_source": "https://www.tiktok.com/@x/video/2",
                               "p_title": None, "p_notes": "um dragão aparece"}) in calls
+
+
+def test_factory_form_sends_the_production_profile_and_blocks_impossible_ones(panel):
+    async def scenario(page, fake):
+        await page.get_by_role("heading", name="Anna und der Hund").wait_for()
+        create = page.get_by_role("button", name="Criar na Fábrica")   # a Fábrica é a aba padrão
+        assert await create.is_enabled()
+        await page.get_by_label("Referências (até 5)").fill("https://www.tiktok.com/@a/video/1\n\nC:/v/2.mp4")
+        await page.get_by_text("2 de 5 referência(s)").wait_for()
+        await page.get_by_label("Mínimo de cenas").fill("30")   # 30 × 6 s = 180 s, mais que os 120 s do máximo
+        assert await create.is_disabled()
+        await page.get_by_text("somam 180 s").wait_for()
+        await page.get_by_label("Mínimo de cenas").fill("12")
+        await page.get_by_label("Estilo visual").select_option("clay")
+        await page.get_by_placeholder("Título (opcional)").fill("Novela")
+        await create.click()
+        await page.get_by_text("Projeto criado na Fábrica de roteiros.").wait_for()
+        return fake.rpc_calls
+    calls = drive(panel, scenario)
+    assert [c[0] for c in calls] == ["create_factory_project"]
+    args = calls[0][1]
+    assert args["p_title"] == "Novela" and args["p_model"] is None
+    profile = args["p_profile"]
+    assert profile["references"] == ["https://www.tiktok.com/@a/video/1", "C:/v/2.mp4"]
+    assert (profile["language"], profile["style"], profile["min_s"], profile["max_s"], profile["min_scenes"], profile["scene_min_s"], profile["scene_max_s"], profile["audio"]) == \
+        ("pt-BR", "clay", 90, 120, 12, 6, 10, "dialogos")
+
+
+def test_choosing_one_of_the_five_proposals_calls_choose_proposal(panel):
+    async def scenario(page, fake):
+        await page.get_by_role("heading", name="Anna und der Hund").wait_for()
+        fake.stages[3].update(stage_key="f_proposals", title="Cinco propostas originais", payload={
+            "summary": "Cinco propostas prontas.", "recommended": 2, "proposals": [{"n": n, "title": f"Título {n}", "hook": f"Gancho {n}"} for n in range(1, 6)]})
+        await page.reload()
+        await page.get_by_text("Qual história desenvolver?").wait_for()
+        assert await page.locator(".proposalbtns button").count() == 5
+        assert await page.get_by_role("button", name=re.compile("Título 2")).get_attribute("aria-pressed") == "true", "sem escolha vale a recomendada"
+        await page.get_by_role("button", name=re.compile("Título 4")).click()
+        await page.get_by_text("História 4 escolhida").wait_for()
+        return fake.rpc_calls
+    calls = drive(panel, scenario)
+    assert ("choose_proposal", {"p_stage_id": "stage-4", "p_number": 4}) in calls
+
+
+def _with_local_clip(fake):
+    fake.artifacts.append({"id": "vid-1", "project_id": fake.project["id"], "stage_id": "stage-4", "artifact_type": "video", "name": "Clipe 01",
+                           "item_key": "vid-clipe-01", "storage_path": None, "local_relative_path": "videos/clipe 01.mp4", "version": 1,
+                           "content": {"local": True, "duration": 10}, "updated_at": NOW})
+
+
+async def _watch(page):
+    """Anota os endereços de vídeo que o player pede (e responde vazio: só importa de onde ele busca)."""
+    seen: list[str] = []
+
+    async def clip(route):
+        seen.append(route.request.url)
+        await route.fulfill(status=200, headers={"content-type": "video/mp4", "access-control-allow-origin": "*"}, body=b"")
+    await page.route(re.compile(r".*/v/11111111-aaaa-bbbb-cccc-000000000001/.*"), clip)
+    return seen
+
+
+async def _video_state(page, seen):
+    """(endereço pedido pelo player, aviso mostrado no lugar do player)."""
+    await page.get_by_text("Clipe 01").first.wait_for()
+    for _ in range(40):
+        note = await page.evaluate("document.querySelector('.videoerr span')?.textContent ?? null")
+        if seen or note:
+            await page.wait_for_timeout(300)
+            return (seen[0] if seen else None), await page.evaluate("document.querySelector('.videoerr span')?.textContent ?? null")
+        await page.wait_for_timeout(100)
+    return None, None
+
+
+def test_local_video_plays_from_the_pc_address_when_the_panel_is_open_on_that_pc(panel):
+    async def scenario(page, fake):
+        _with_local_clip(fake)
+        seen = await _watch(page)
+        await page.reload()
+        await page.get_by_text("Anna und der Hund").first.click()
+        return await _video_state(page, seen)
+    src, note = drive(panel, scenario)
+    assert src == "http://127.0.0.1:8765/v/11111111-aaaa-bbbb-cccc-000000000001/videos/clipe%2001.mp4?k=SENHA-DO-ESTUDIO", note
+
+
+def test_away_from_home_the_video_comes_from_the_tunnel_and_never_from_supabase_storage(panel):
+    async def scenario(page, fake):
+        _with_local_clip(fake)
+        # o mesmo painel aberto em outro endereço (celular/site): não é o PC do worker, então tem de usar o túnel
+        async def serve(route):
+            response = await route.fetch(url=route.request.url.replace("http://panel.test", panel))
+            await route.fulfill(response=response)
+        await page.route("http://panel.test/**", serve)
+        seen = await _watch(page)
+        await page.goto("http://panel.test/")
+        await page.get_by_text("Anna und der Hund").first.click()
+        src, note = await _video_state(page, seen)
+        storage = [r for r in fake.rpc_calls if "storage" in r[0]]
+        return src, note, storage
+    src, note, storage = drive(panel, scenario)
+    assert src == "https://rapid-fox.trycloudflare.com/v/11111111-aaaa-bbbb-cccc-000000000001/videos/clipe%2001.mp4?k=SENHA-DO-ESTUDIO", note
+    assert storage == []
+
+
+def test_video_explains_why_it_cannot_play_when_the_pc_is_off_or_remote_access_is_not_set_up(panel):
+    async def off(page, fake):
+        _with_local_clip(fake)
+        fake.heartbeat_age = 600
+        seen = await _watch(page)
+        await page.reload()
+        await page.get_by_text("Anna und der Hund").first.click()
+        return await _video_state(page, seen)
+    src, note = drive(panel, off)
+    assert src is None and "desligado" in note and "só nele" in note
+
+    async def no_tunnel(page, fake):
+        _with_local_clip(fake)
+        fake.media["public_url"] = None
+        async def serve(route):
+            await route.fulfill(response=await route.fetch(url=route.request.url.replace("http://panel.test", panel)))
+        await page.route("http://panel.test/**", serve)
+        seen = await _watch(page)
+        await page.goto("http://panel.test/")
+        await page.get_by_text("Anna und der Hund").first.click()
+        return await _video_state(page, seen)
+    src, note = drive(panel, no_tunnel)
+    assert src is None and "cloudflared" in note

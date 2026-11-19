@@ -11,7 +11,7 @@ import sys
 import time
 import traceback
 
-from . import config, folders
+from . import config, folders, media_server, tunnel
 from .brain import ClaudeBrain
 from .browser import selectors
 from .browser.chatgpt import ChatGPT
@@ -20,7 +20,7 @@ from .browser.session import Browser
 from .claude_bridge.batches import create_batch
 from .db import Db, SupabaseSink, now
 from .errors import Blocked
-from .pipeline import stages
+from .pipeline import factory, stages
 from .pipeline.core import Ctx, sequel_context
 
 HOST = socket.gethostname()
@@ -37,6 +37,19 @@ def story_of(project: dict) -> dict | None:
     if project.get("mode") != "story":
         return None
     return {"idea": project.get("story_idea") or "", "target_s": int(project.get("target_seconds") or 60), "min_scenes": int(project.get("min_scenes") or 1)}
+
+
+def factory_context(db, project: dict) -> tuple[dict | None, int | None]:
+    """Fábrica de roteiros: o perfil de produção (Fase 0) e a proposta que o usuário escolheu desenvolver. Fora desse modo, (None, None)."""
+    if project.get("mode") != "factory":
+        return None, None
+    try:
+        profile = factory.normalize_profile(project.get("profile"))
+    except ValueError as exc:
+        raise Blocked("MISSING_INPUT", f"Perfil de produção inválido: {exc}", "Crie o projeto de novo com um perfil possível.") from None
+    reader = getattr(db, "stage_payload", None)
+    chosen = ((reader(project["id"], "f_proposals") if reader else None) or {}).get("chosen")
+    return profile, int(chosen) if chosen else None
 
 
 async def process(db: Db, job: dict, brain_for, images, video, pools: dict | None = None) -> None:
@@ -68,13 +81,14 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
     sink = SupabaseSink(db, project, stage, project_dir)
     try:
         sequel = sequel_context(project, config.PROJECTS_DIR)
-    except Blocked as exc:   # sem o roteiro da parte anterior neste PC não há como continuar
+        profile, chosen = factory_context(db, project)
+    except Blocked as exc:   # sem o roteiro da parte anterior neste PC (ou com um perfil impossível) não há como continuar
         db.update_stage(stage["id"], status="failed", remove=("progress",), patch={"error": exc.as_dict()})
         db.finish_job(job["id"], "blocked", error_code=exc.code, error_message=exc.message)
         return
     ctx = Ctx(sequel=sequel, project_id=project["id"], source=project.get("source_url") or project.get("source_video_path") or "", dir=project_dir,
               sink=sink, brain=brain_for(project_dir, project.get("model")), images=images, video=video, stage_key=stage["stage_key"], version=stage["current_version"],
-              feedback=inp.get("feedback"), max_clip=config.GROK_MAX_CLIP_SECONDS, whisper_model=config.WHISPER_MODEL,
+              feedback=inp.get("feedback"), max_clip=factory.MAX_CLIP_S if profile else config.GROK_MAX_CLIP_SECONDS, profile=profile, chosen=chosen, whisper_model=config.WHISPER_MODEL,
               language=config.REFERENCE_LANGUAGE, plan=project.get("import_plan"), clone=project.get("mode") == "clone", story=story_of(project), direct_sheets=has_no_body_stage(db, project), image_concurrency=config.IMAGE_CONCURRENCY, video_concurrency=config.VIDEO_CONCURRENCY,
               image_slots=(pools or {}).get("image"), video_slots=(pools or {}).get("video"), pilot_approved=bool((stage.get("payload") or {}).get("pilot_approved")),
               overrides=dict((stage.get("payload") or {}).get("prompt_overrides") or {}), force=set(inp.get("force_items") or []), pause=lambda: asyncio.sleep(config.PAUSE_BETWEEN_ITEMS))
@@ -89,7 +103,7 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
             db.update_stage(stage["id"], status="pending_review", remove=("progress",))
         else:
             result = await stages.run_stage(ctx)
-            db.update_stage(stage["id"], status="pending_review", submitted_at=now(), remove=("progress", "next_generation", "warnings", "pilot", "pilot_remaining"),
+            db.update_stage(stage["id"], status="pending_review", submitted_at=now(), remove=("progress", "next_generation", "warnings", "pilot", "pilot_remaining", "chosen", "proposals", "recommended"),
                             patch={"local_dir": str(project_dir), **result})
             ctx.log(f"Etapa pronta para revisão. {result.get('summary', '')}")
         db.finish_job(job["id"], "succeeded", output={"stage_key": stage["stage_key"]})
@@ -109,19 +123,50 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
         ctx.log(f"Falha na etapa: {error['message']}", "error")
 
 
-async def heartbeat(db: Db, state: dict) -> None:
+async def heartbeat(db: Db, state: dict, media: tunnel.RemoteMedia | None = None) -> None:
+    published, warned = None, False
     while True:
         try:
             db.heartbeat(HOST, "online", state)
         except Exception as exc:  # noqa: BLE001
             print(f"Heartbeat falhou: {exc}", flush=True)
+        if media is not None:
+            snapshot = media.snapshot()
+            if snapshot != published:   # o endereço do túnel muda a cada abertura; o painel precisa do atual
+                try:
+                    db.publish_media(snapshot)
+                    published, warned = snapshot, False
+                except Exception as exc:  # noqa: BLE001
+                    if not warned:
+                        print(f"Não consegui publicar o endereço dos vídeos (aplique a migração 0018_worker_media.sql): {exc}", flush=True)
+                        warned = True
         await asyncio.sleep(15)
+
+
+def start_media() -> tunnel.RemoteMedia:
+    """Servidor local de vídeos (com senha) e, se possível, o túnel que o torna alcançável fora de casa."""
+    token = media_server.load_token(config.RUNTIME_DIR)
+    server = media_server.start(config.PROJECTS_DIR, config.LOCAL_MEDIA_PORT, token)
+    if server is None:
+        return tunnel.RemoteMedia(token, None)
+    port = server.server_address[1]
+    media = tunnel.RemoteMedia(token, f"http://127.0.0.1:{port}", config.MEDIA_PUBLIC_URL or None)
+    if config.MEDIA_PUBLIC_URL:
+        print(f"Vídeos acessíveis de fora de casa em {config.MEDIA_PUBLIC_URL} (endereço informado em MEDIA_PUBLIC_URL).", flush=True)
+    elif config.MEDIA_TUNNEL != "off":
+        exe = tunnel.find_cloudflared(config.CLOUDFLARED_PATH)
+        if exe:
+            media.tunnel = tunnel.Tunnel(tunnel.command(exe, port)).start()
+        else:
+            print("Vídeos só neste PC: para vê-los de fora de casa instale o cloudflared (winget install Cloudflare.cloudflared) e reinicie o worker.", flush=True)
+    return media
 
 
 async def main() -> None:
     if not config.SUPABASE_URL or not config.SUPABASE_SECRET_KEY or "YOUR_PROJECT_REF" in config.SUPABASE_URL:
         raise SystemExit("Configure SUPABASE_URL e SUPABASE_SECRET_KEY em worker/.env (veja worker/.env.example).")
     db = Db()
+    media = start_media()
     browser = Browser()
     sel = selectors.load(config.SELECTORS_FILE)
     images, video = ChatGPT(browser, sel), Grok(browser, sel)
@@ -140,7 +185,7 @@ async def main() -> None:
     stale = db.requeue_stale()
     if stale:
         print(f"{stale} tarefa(s) interrompida(s) voltaram para a fila.", flush=True)
-    beat = asyncio.create_task(heartbeat(db, state))
+    beat = asyncio.create_task(heartbeat(db, state, media))
     idle_since = time.monotonic()
     active: dict[str, tuple[asyncio.Task, str, str]] = {}   # id da tarefa -> (execução, id do projeto, etapa)
 
@@ -189,8 +234,10 @@ async def main() -> None:
                 await asyncio.wait([task for task, _, _ in active.values()], timeout=config.POLL_SECONDS, return_when=asyncio.FIRST_COMPLETED)
     finally:
         beat.cancel()
+        media.stop()
         try:
             db.heartbeat(HOST, "offline", {})
+            db.publish_media({**media.snapshot(), "public_url": None})   # PC desligado: o painel avisa em vez de tentar um túnel morto
         except Exception:  # noqa: BLE001
             pass
         await browser.close()

@@ -49,3 +49,9 @@ A assinatura do ChatGPT Go e do SuperGrok não garante que suas interfaces permi
 - Python: cria pacotes, executa tarefas determinísticas e valida/organiza resultados.
 - A execução browser-first é iniciada pelo usuário em sessão Claude Code ativa (`claude --chrome`). O worker não manipula cookies, credenciais ou abas.
 - Se Claude Code atingir cota, o lote fica pendente; Python/Supabase preservam estado e arquivos.
+
+## Atualização v0.5 — Fábrica de roteiros + workflow de animação (9:16)
+- Novo modo de projeto `factory` (migração `0017_factory_mode.sql`): perfil de produção em `projects.profile`, oito etapas (`f_refs`, `f_proposals`, `f_script`, `f_bible`, `f_workflow`, depois `character_sheets`, `scene_images` e `production`, que são as mesmas dos outros modos).
+- `worker/app/pipeline/factory.py` (perfil, pedidos ao Claude, conferências e documentos) e `factory_stages.py` (as cinco etapas de texto). As etapas de texto gravam `bible.json`, `plan.json` e `clips.json` no mesmo formato de sempre, então a geração de imagens e vídeos é compartilhada.
+- A Fábrica termina na bíblia (Doc F5: metadados, personagens, ambientes, continuidade). Dali em diante o workflow (`worker/workflow/*.md`, editáveis) cria as cenas: imagem de segundo zero, Animation & Camera Action, diálogos e duração de até 10 s.
+- Tudo em 9:16, inclusive as folhas de personagem (antes 16:9) e os modos antigos.

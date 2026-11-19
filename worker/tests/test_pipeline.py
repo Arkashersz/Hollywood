@@ -722,7 +722,7 @@ def test_direct_sheets_skip_the_body_image_and_use_only_the_text_description(pro
     ctx.direct_sheets = True
     run(ctx, "analysis"); run(ctx, "script")
     bible = run(ctx, "character_bible")
-    assert bible["next_generation"]["unit"] == "folhas 16:9 de personagem" and bible["next_generation"]["count"] == 2
+    assert bible["next_generation"]["unit"] == "folhas 9:16 de personagem" and bible["next_generation"]["count"] == 2
     assert "sem imagem de corpo inteiro" in (ctx.dir / "04-personagens.md").read_text(encoding="utf-8")
     assert "Prompt da imagem de corpo inteiro" not in (ctx.dir / "04-personagens.md").read_text(encoding="utf-8")
     out = run(ctx, "character_sheets")

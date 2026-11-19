@@ -24,6 +24,13 @@ DOCS = {
     "08": ("08-prompts-grok.md", "Documento 08 · Prompts dos vídeos (Grok)"),
     "09": ("09-plano-edicao-capcut.md", "Documento 09 · Plano de edição no CapCut"),
     "10": ("10-kit-publicacao.md", "Documento 10 · Kit de publicação"),
+    # Fábrica de roteiros + workflow de animação (modo "factory")
+    "F1": ("f1-analise-das-referencias.md", "Documento F1 · Análise individual das referências"),
+    "F2": ("f2-matriz-de-aprendizados.md", "Documento F2 · Matriz de aprendizados"),
+    "F3": ("f3-cinco-propostas.md", "Documento F3 · Cinco propostas originais"),
+    "F4": ("f4-roteiro-completo.md", "Documento F4 · Roteiro completo"),
+    "F5": ("f5-pacote-da-fabrica.md", "Documento F5 · Pacote da Fábrica (metadados, personagens e ambientes)"),
+    "F6": ("f6-workflow-de-animacao.md", "Documento F6 · Workflow de animação (cenas 9:16)"),
 }
 
 
@@ -77,9 +84,11 @@ class Ctx:
     force: set = field(default_factory=set)          # itens a refazer mesmo já prontos (ajuste pedido numa etapa parada)
     sequel: dict | None = None      # continuação (parte 2+): {part, notes, story, characters, has_ref, doc02}
     clone: bool = False             # modo cópia fiel: roteiro, cortes e câmera idênticos ao original
-    direct_sheets: bool = False     # sem a etapa de imagens de corpo inteiro: a folha 16:9 sai direto da descrição
+    direct_sheets: bool = False     # sem a etapa de imagens de corpo inteiro: a folha 9:16 sai direto da descrição
     story: dict | None = None       # história criada a partir de uma ideia: {idea, target_s, min_scenes}
     plan: dict | None = None        # prompts trazidos prontos pelo usuário (projeto iniciado numa etapa avançada)
+    profile: dict | None = None     # Fábrica de roteiros: perfil de produção (Fase 0) já normalizado
+    chosen: int | None = None       # Fábrica: número da proposta que o usuário escolheu desenvolver (None = a recomendada)
     _generated: dict = field(default_factory=dict)
 
     # --- registro -----------------------------------------------------------
