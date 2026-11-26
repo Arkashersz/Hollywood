@@ -81,6 +81,14 @@ class Db:
     def upsert_artifact(self, row: dict) -> None:
         self.client.table("artifacts").upsert({**row, "updated_at": now()}, on_conflict="project_id,item_key").execute()
 
+    def prune_artifacts(self, stage_id: str, keep: set[str]) -> list[str]:
+        """Remove do painel as imagens/vídeos da etapa que não existem mais no plano atual (documentos nunca são removidos)."""
+        rows = self.client.table("artifacts").select("item_key,artifact_type").eq("stage_id", stage_id).in_("artifact_type", ["image", "video"]).execute().data or []
+        gone = [r["item_key"] for r in rows if r["item_key"] not in keep]
+        for key in gone:
+            self.client.table("artifacts").delete().eq("stage_id", stage_id).eq("item_key", key).execute()
+        return gone
+
     def upload(self, path: str, data: bytes, content_type: str) -> None:
         self.client.storage.from_(config.STORAGE_BUCKET).upload(path, data, {"content-type": content_type, "upsert": "true"})
 
@@ -137,6 +145,14 @@ class SupabaseSink:
 
     def document(self, stage_key: str, item_key: str, name: str, path: Path) -> None:
         self.db.upsert_artifact({**self._row(item_key, name, path, "document"), "content": {"markdown": path.read_text(encoding="utf-8")}})
+
+    def prune(self, stage_key: str, keep: set[str]) -> list[str]:
+        gone = self.db.prune_artifacts(self.stage["id"], keep)
+        for key in gone:
+            self._cache.pop(key, None)
+        if gone:
+            self._cache_path.write_text(json.dumps(self._cache, indent=1), encoding="utf-8")
+        return gone
 
     def file(self, stage_key: str, item_key: str, name: str, path: Path, kind: str, meta: dict | None = None) -> None:
         stat = path.stat()

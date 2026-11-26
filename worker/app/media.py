@@ -28,6 +28,11 @@ def slugify(value: str, limit: int = 60) -> str:
     return value[:limit].strip("-") or "item"
 
 
+def split_sources(source: str | None) -> list[str]:
+    """Uma continuação pode se inspirar em vários vídeos: um link (ou caminho) por linha, na ordem da história."""
+    return [line.strip() for line in str(source or "").splitlines() if line.strip()]
+
+
 VIDEO_DURATIONS = (6, 10, 15)   # durações que o Grok oferece
 
 

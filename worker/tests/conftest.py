@@ -93,3 +93,4 @@ def fast_timeouts(monkeypatch):
     monkeypatch.setattr(common, "SETTLE_SECONDS", 0.2)
     monkeypatch.setattr(config, "STALL_SECONDS", 4)
     monkeypatch.setattr(config, "PAUSE_BETWEEN_ITEMS", 0)
+    monkeypatch.setattr(config, "GROK_LANDING_SECONDS", 1)

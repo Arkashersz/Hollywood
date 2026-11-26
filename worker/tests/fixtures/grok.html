@@ -5,7 +5,7 @@
 <!-- Página local que imita o contrato de DOM usado pelo adaptador. Não é o Grok. -->
 <body>
 <header id="top"></header>
-<div id="feed"><video src="/old.mp4" preload="auto" muted></video></div>
+<div id="feed"><video src="/old.mp4?asset=0a1b2c3d-1111-4222-8333-444455556666" preload="auto" muted></video></div>
 <div id="alerts"></div>
 <div id="opts">
   <button type="button" data-k="res" aria-label="Resolução do vídeo">480p</button>
@@ -52,6 +52,14 @@ document.getElementById('go').addEventListener('click', () => {
     return;
   }
   if (prompt.includes('[[never]]')) return;
+  // Como no Grok: um envio feito cedo demais não gera nada e a página volta para a postagem do último vídeo (aqui: o vídeo que já estava no feed).
+  localStorage.setItem('sends', String(Number(localStorage.getItem('sends') || 0) + 1));
+  if (prompt.includes('[[ghost]]') && !localStorage.getItem('ghosted')) {
+    localStorage.setItem('ghosted', '1');
+    history.pushState({}, '', '/imagine/post/0a1b2c3d-1111-4222-8333-444455556666?conversation=x');
+    return;
+  }
+  history.pushState({}, '', '/imagine/post/9f9f9f9f-0000-4000-8000-00000000000' + (localStorage.getItem('sends') % 10));
   const add = (src, delay) => setTimeout(() => {
     const video = document.createElement('video');
     video.preload = 'auto'; video.muted = true;

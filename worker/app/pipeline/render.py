@@ -52,8 +52,19 @@ def identification(evidence: dict) -> str:
 # ---------------------------------------------------------------------------
 # Prompts finais
 # ---------------------------------------------------------------------------
+def current_look(entry: dict) -> str:
+    """Descrição fixa de um personagem/ambiente + os ajustes que o usuário aprovou nas imagens (`approved_changes`).
+    Sem isso, os prompts de cena e de vídeo continuariam descrevendo a aparência ANTERIOR ao ajuste."""
+    text = entry["fixed_description"]
+    changes = [str(c).strip() for c in entry.get("approved_changes") or [] if str(c).strip()]
+    if not changes:
+        return text
+    return (f"{text.rstrip()} USER-APPROVED CHANGES (part of the current look; they override any conflicting detail above): "
+            + "; ".join(changes) + ".")
+
+
 def full_body_prompt(bible: dict, ch: dict) -> str:
-    return (f"{bible['style_block']}\n\nCharacter: {ch['fixed_description']}\n\n"
+    return (f"{bible['style_block']}\n\nCharacter: {current_look(ch)}\n\n"
             "Full-body character reference image: neutral standing pose, front view, the whole figure visible from head to feet, "
             "plain light-gray seamless background, no other characters, no text. Vertical 9:16 format.")
 
@@ -61,7 +72,7 @@ def full_body_prompt(bible: dict, ch: dict) -> str:
 def sheet_prompt(bible: dict, ch: dict, with_reference: bool = True) -> str:
     expressions = ", ".join(ch["expressions"]) or "neutral, happy, sad, angry, surprised, afraid"
     details = ", ".join(ch["details"]) or "outfit and accessories"
-    return (f"{bible['style_block']}\n\nCharacter: {ch['fixed_description']}\n\n"
+    return (f"{bible['style_block']}\n\nCharacter: {current_look(ch)}\n\n"
             "Character reference sheet in vertical 9:16 portrait format, laid out as clean stacked rows. "
             + ("Use the attached image as the exact identity reference: same face, body, outfit and colors in every view. " if with_reference else
                "Design this character exactly as described above, with the same face, body, outfit, colors and accessories in every view. ")
@@ -71,35 +82,99 @@ def sheet_prompt(bible: dict, ch: dict, with_reference: bool = True) -> str:
 
 
 def environment_prompt(bible: dict, env: dict) -> str:
-    return (f"{bible['style_block']}\n\nEnvironment: {env['fixed_description']}\n\n"
+    return (f"{bible['style_block']}\n\nEnvironment: {current_look(env)}\n\n"
             "Establishing image of the empty environment: no people, no characters, no text. Vertical 9:16 format.")
 
 
 def scene_prompt(bible: dict, plan: dict, scene: dict) -> str:
     chars = {c["name"]: c for c in bible["characters"]}
     env = next(e for e in plan["environments"] if e["name"] == scene["environment"])
-    cast = "\n".join(f"- {n}: {chars[n]['fixed_description']}" for n in scene["characters"]) or "- none"
+    cast = "\n".join(f"- {n}: {current_look(chars[n])}" for n in scene["characters"]) or "- none"
     if scene.get("pre_action"):   # workflow de animação: a foto do segundo zero, antes de a ação começar
         return (f"{bible['style_block']}\n\nInitial still frame (second zero) for an image-to-video clip. Vertical 9:16 format.\n\n"
                 f"Static pre-action image: {scene['composition']}\n\n"
                 f"Characters (match the attached character sheets exactly, same outfit and colors):\n{cast}\n\n"
-                f"Environment (match the attached environment image): {env['fixed_description']}\n\n"
+                f"Environment (match the attached environment image): {current_look(env)}\n\n"
                 "Show only the exact moment before the action starts: zero motion, pre-action pose, no particles, no effects, no transformation yet, "
                 "no motion blur, no subtitles, no captions, no text overlays.")
     return (f"{bible['style_block']}\n\nInitial still frame for an image-to-video clip. Vertical 9:16 format.\n\n"
             f"Composition: {scene['composition']}\n\n"
             f"Characters (match the attached character sheets exactly):\n{cast}\n\n"
-            f"Environment (match the attached environment image): {env['fixed_description']}\n\n"
+            f"Environment (match the attached environment image): {current_look(env)}\n\n"
             "Show only this initial stable moment: no motion blur, no subtitles, no captions, no text overlays.")
 
 
 def clip_prompt(bible: dict, clip: dict) -> str:
+    """Prompt enviado ao Grok. Clipes planejados com linha do tempo recebem as travas; os antigos mantêm o formato de antes."""
+    return locked_clip_prompt(bible, clip) if clip.get("timeline") else _legacy_clip_prompt(bible, clip)
+
+
+def _t(seconds: float) -> str:
+    return f"{float(seconds):.1f}"
+
+
+def locked_clip_prompt(bible: dict, clip: dict) -> str:
+    """Prompt com travas: animação segundo a segundo, câmera, falas com horário, silêncio de quem não fala, voz, visual e continuidade."""
+    chars = {c["name"]: c for c in bible["characters"]}
+    duration = float(clip["duration_s"])
+    planned = min(float(clip.get("planned_s") or duration), duration)
+    cast = [chars[n] for n in clip.get("cast") or [] if n in chars and not chars[n]["voice_only"]]
+    on_screen = {c["name"] for c in cast}
+    lines = clip.get("lines") or []
+    speakers = list(dict.fromkeys(line["speaker"] for line in lines))
+    parts = [f"Image-to-video clip, {clip['duration_s']} seconds, vertical 9:16. Start EXACTLY from the attached start image (same poses, positions and framing) "
+             "and play it as ONE continuous shot: no cuts, no scene change, no new shot.",
+             f"SCENE: {clip['prompt']}"]
+
+    beats = [f"- {_t(b['start_s'])}–{_t(b['end_s'])} s: {b['action']}" for b in clip["timeline"]]
+    if planned < duration - 0.05:   # o Grok só gera 6, 10 ou 15 s: o resto fica parado e é cortado na edição
+        beats.append(f"- {_t(planned)}–{_t(duration)} s: everyone holds the final pose, still and silent; nothing new happens.")
+    parts.append("ANIMATION LOCK (follow this timeline exactly, beat by beat; every movement happens only in its time range; nothing that is not written here happens):\n" + "\n".join(beats))
+    parts.append(f"CAMERA LOCK: {clip.get('camera') or 'Locked-off static camera.'} No other camera movement, zoom, shake or cut.")
+
+    if lines:
+        def who(line: dict) -> str:
+            gender = f" ({line['gender_en']})" if line.get("gender_en") else ""
+            off = "" if line["speaker"] in on_screen else " (off-screen voice; no on-screen mouth moves)"
+            return f"{line['speaker']}{gender}{off}"
+        said = "\n".join(f"- {_t(line['start_s'])}–{_t(line['end_s'])} s · {who(line)}: \"{line['text']}\"" + (f" — delivery: {line['delivery']}" if line.get("delivery") else "")
+                         for line in lines)
+        rule = ("SPEAKING RULE: only the character whose line is playing moves the lips, in perfect lip sync, and only inside that time range. "
+                "Every other character keeps the mouth CLOSED and stays silent, reacting only with eyes, eyebrows, head and body. "
+                "Nobody speaks outside these ranges: no extra words, no off-screen voices, no humming, no background chatter.")
+        silent = [c["name"] for c in cast if c["name"] not in speakers]
+        if silent:
+            rule += f" Silent for the whole clip, mouth closed: {', '.join(silent)}."
+        parts.append(f"DIALOGUE LOCK (spoken in {clip.get('language_en') or 'German'}, word for word, in this order; nothing else is said):\n{said}\n{rule}")
+    else:
+        parts.append("DIALOGUE LOCK: this clip has NO dialogue. Every mouth stays closed: nobody speaks, whispers, sings or mumbles; only ambient sound.")
+
+    voices = [chars[n] for n in speakers if n in chars]
+    if voices:
+        parts.append("VOICE LOCK (each voice is identical in every clip of this video and belongs only to its character; never swap or blend voices, "
+                     "never change pitch, timbre, age, accent, energy or speed):\n" + "\n".join(f"- {c['name']}: {c['voice']['descriptor_en']}" for c in voices))
+    if cast:
+        parts.append("DESIGN LOCK (each character looks EXACTLY like the attached reference images in every frame, from the first to the last: same face, "
+                     "body proportions, anatomy, hair, outfit, colors and accessories; nothing is added, removed, swapped or morphs):\n"
+                     + "\n".join(f"- {c['name']}: {current_look(c)}" for c in cast))
+    keep = [*(clip.get("keep") or []),
+            f"Only these characters are in the shot: {', '.join(c['name'] for c in cast) or 'none'}. Nobody enters or leaves unless the timeline says so.",
+            "Props keep their shape, size, color, position and the hand that holds them; nothing appears, disappears, duplicates or changes unless the timeline shows it.",
+            "The environment stays exactly as in the start image (same layout, furniture, lighting and time of day); the background never morphs."]
+    parts.append("CONTINUITY LOCK:\n" + "\n".join(f"- {k}" for k in keep))
+    parts.append(f"SOUND: {clip.get('ambient') or 'Natural ambient sound of the scene.'} No background music.")
+    parts.append("AVOID: subtitles, captions, on-screen text, logos, watermarks, extra characters, extra fingers or limbs, face or outfit changes, "
+                 "sudden jumps, flicker, morphing, slow motion unless written above.")
+    return "\n\n".join(parts)
+
+
+def _legacy_clip_prompt(bible: dict, clip: dict) -> str:
     chars = {c["name"]: c for c in bible["characters"]}
     voices = "\n".join(f"- {n}: {chars[n]['voice']['descriptor_en']}" for n in clip["speakers"])
     voice_block = f"\n\nVoices (keep identical in every clip):\n{voices}" if voices else ""
     cast = [chars[n] for n in clip.get("cast") or [] if n in chars and not chars[n]["voice_only"]]
     look = ("\n\nCharacter consistency (each character must look EXACTLY like the attached reference images in every frame: same face, hair, outfit, colors and accessories "
-            "such as glasses or hats; change nothing unless the action above says so):\n" + "\n".join(f"- {c['name']}: {c['fixed_description']}" for c in cast)) if cast else ""
+            "such as glasses or hats; change nothing unless the action above says so):\n" + "\n".join(f"- {c['name']}: {current_look(c)}" for c in cast)) if cast else ""
     lines = clip.get("lines") or []   # workflow de animação: falas na ordem, com nome e gênero de quem fala
     talk = ""
     if lines:
@@ -148,7 +223,7 @@ def doc04(bible: dict, direct: bool = False) -> str:
         if ch["voice_only"]:
             parts.append("Personagem só de voz (sem imagem). Veja o Documento 06.")
             continue
-        parts += ["**Descrição fixa** (imutável, colada em todo prompt em que aparece):", _code(ch["fixed_description"]),
+        parts += ["**Descrição fixa** (imutável, colada em todo prompt em que aparece):", _code(current_look(ch)),
                   "**Nunca pode mudar:**", _bullets(ch["never_change_pt"])]
         if not direct:
             parts += [f"**Prompt da imagem de corpo inteiro** → `{body_path(ch).as_posix()}`", _code(full_body_prompt(bible, ch))]
@@ -192,7 +267,7 @@ def doc07(bible: dict, plan: dict) -> str:
     for e in plan["environments"]:
         if e.get("reused"):
             parts.append("**Já existe (parte anterior):** a imagem deste ambiente é reaproveitada e não é gerada de novo.")
-        parts += [f"### {e['name']}", "**Descrição fixa:**", _code(e["fixed_description"]), "**Prompt:**", _code(environment_prompt(bible, e))]
+        parts += [f"### {e['name']}", "**Descrição fixa:**", _code(current_look(e)), "**Prompt:**", _code(environment_prompt(bible, e))]
     parts += [
         "## 3. Lighting / Mood / Style", a["lighting_mood_style_pt"], "**Bloco de estilo global:**", _code(bible["style_block"]),
         "## 4. Area Flow Plan / Camera Movement", a["area_flow_plan_pt"],
@@ -240,7 +315,7 @@ def doc08(bible: dict, clips: dict, max_clip: int, catalog: dict | None = None) 
         start = ", ".join(refs) if refs else f"`{scene_path(c['scene']).as_posix()}`"
         parts += [f"## Clipe {c['n']:02d} · cena {c['scene']}",
                   f"**Duração:** {c['duration_s']} s  \n**Imagens anexadas (nesta ordem; a primeira é o quadro inicial):** {start}  \n**Arquivo:** `{clip_path(c['n']).as_posix()}`",
-                  f"**Fala (DE):** {c['dialogue_de'] or '—'}  \n**Tradução (PT):** {c['dialogue_pt'] or '—'}",
+                  f"**Fala (DE):** {(c['dialogue_de'] or '—').replace(chr(10), '  ' + chr(10))}  \n**Tradução (PT):** {c['dialogue_pt'] or '—'}",
                   "**Prompt:**", _code(clip_prompt(bible, c)),
                   f"**Continuidade:** {c['continuity_pt'] or NA}", "**Conferir ao receber:**", _bullets(c["check_pt"])]
     parts.append(f"## O que você decide\nAo aprovar, o worker gera no Grok {len(clips['clips'])} clipes, um por vez, com exatamente os prompts acima.")

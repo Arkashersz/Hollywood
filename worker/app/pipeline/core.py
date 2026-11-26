@@ -10,7 +10,7 @@ from typing import Callable
 
 from ..errors import Blocked
 from ..folders import find_project_dir
-from ..media import slugify, snap_duration
+from ..media import slugify, snap_duration, split_sources
 from . import prompts, render
 
 DOCS = {
@@ -52,7 +52,13 @@ class LocalSink:
         self.documents[item_key] = path.read_text(encoding="utf-8")
 
     def file(self, stage_key: str, item_key: str, name: str, path: Path, kind: str, meta: dict | None = None) -> None:
-        self.media[item_key] = {"name": name, "path": str(path), "kind": kind, "meta": meta or {}}
+        self.media[item_key] = {"name": name, "path": str(path), "kind": kind, "meta": meta or {}, "stage": stage_key}
+
+    def prune(self, stage_key: str, keep: set[str]) -> list[str]:
+        gone = [k for k, m in self.media.items() if k not in keep and m["kind"] in ("image", "video") and m.get("stage") == stage_key]
+        for key in gone:
+            self.media.pop(key)
+        return gone
 
     def progress(self, stage_key: str, done: int, total: int, label: str) -> None:
         if self.echo:
@@ -149,6 +155,57 @@ class Ctx:
         path = self._generated_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(self._generated, indent=1), encoding="utf-8")
+        self.clear_stale(item_key)   # acabou de ser feito com as referências atuais
+
+    # --- ajustes pedidos pelo usuário (acumulam: cada novo ajuste parte dos anteriores) -----------------
+    MAX_ADJUSTMENTS = 20
+
+    def _small_store(self, name: str) -> dict:
+        path = self.dir / "dados" / f"{name}.json"
+        try:
+            return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        except ValueError:
+            return {}
+
+    def _save_small_store(self, name: str, value: dict) -> None:
+        path = self.dir / "dados" / f"{name}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    def adjustments(self, item_key: str) -> list[str]:
+        """Ajustes já aprovados deste item, do mais antigo ao mais novo."""
+        return [str(n) for n in self._small_store("ajustes").get(item_key, [])]
+
+    def add_adjustment(self, item_key: str, note: str) -> None:
+        store = self._small_store("ajustes")
+        notes = [n for n in store.get(item_key, []) if n != note] + [note]
+        store[item_key] = notes[-self.MAX_ADJUSTMENTS:]
+        self._save_small_store("ajustes", store)
+
+    # --- itens desatualizados: dependem de uma imagem que o usuário ajustou depois que eles foram feitos ---
+    def is_stale(self, item_key: str) -> bool:
+        return item_key in self._small_store("desatualizados")
+
+    def mark_stale(self, item_key: str, reason: str) -> None:
+        store = self._small_store("desatualizados")
+        store[item_key] = reason
+        self._save_small_store("desatualizados", store)
+
+    def clear_stale(self, item_key: str) -> None:
+        store = self._small_store("desatualizados")
+        if store.pop(item_key, None) is not None:
+            self._save_small_store("desatualizados", store)
+
+
+def carry_changes(new: dict, old: dict | None, key: str) -> None:
+    """Ao refazer o texto (personagens ou ambientes), os ajustes que o usuário já aprovou nas imagens não se perdem."""
+    if not old:
+        return
+    before = {str(x["name"]).casefold(): x.get("approved_changes") for x in old.get(key) or [] if x.get("approved_changes")}
+    for entry in new.get(key) or []:
+        kept = before.get(str(entry["name"]).casefold())
+        if kept:
+            entry["approved_changes"] = list(kept)
 
 
 def _merge_by_name(base: list, newer: list) -> list:
@@ -209,6 +266,7 @@ def sequel_context(project: dict, projects_dir: Path) -> dict | None:
             "characters": library["characters"], "environments": library["environments"], "style_block": library.get("style_block") or "",
             "library": str(mine / "biblioteca"),
             "has_ref": bool(project.get("source_url") or project.get("source_video_path")),
+            "refs": len(split_sources(project.get("source_url") or project.get("source_video_path"))),
             "doc02": doc02_file.read_text(encoding="utf-8") if doc02_file.is_file() else None}
 
 
@@ -399,6 +457,85 @@ def validate_plan(raw: dict, bible: dict, min_scenes: int = 0) -> dict:
     return {"areas": areas, "environments": envs, "scenes": scenes}
 
 
+# ---------------------------------------------------------------------------
+# Travas do vídeo: linha do tempo da animação e falas com horário
+# ---------------------------------------------------------------------------
+MAX_BEAT_S = 3.0          # nenhum trecho da linha do tempo passa disso: força a descrição movimento a movimento
+WORDS_PER_SECOND_DE = 2.5
+
+
+def count_words(text: str) -> int:
+    return len(re.findall(r"[\wÀ-ÿ]+(?:['’-][\wÀ-ÿ]+)*", text or ""))
+
+
+def _seconds(obj: dict, key: str, where: str) -> float:
+    try:
+        value = round(float(obj.get(key)), 2)
+    except (TypeError, ValueError):
+        raise ValueError(f'{where}: "{key}" precisa ser um número de segundos (ex.: 0.6)') from None
+    if value < 0:
+        raise ValueError(f'{where}: "{key}" não pode ser negativo')
+    return value
+
+
+def validate_timeline(raw, duration: float, where: str) -> list[dict]:
+    """Animação do clipe em trechos contínuos, de 0 até a duração, sem buracos, cada um com no máximo MAX_BEAT_S."""
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f'{where}: "timeline" precisa descrever a animação em trechos com tempo (start_s, end_s, action), de 0.0 a {duration:g} s')
+    out, cursor = [], 0.0
+    for j, beat in enumerate(raw, 1):
+        w = f"{where}.timeline[{j}]"
+        if not isinstance(beat, dict):
+            raise ValueError(f"{w} não é um objeto")
+        start, end = _seconds(beat, "start_s", w), _seconds(beat, "end_s", w)
+        if abs(start - cursor) > 0.15:
+            raise ValueError(f"{w}: começa em {start:g} s, mas precisa começar em {cursor:g} s"
+                             + (" (onde o trecho anterior termina; a linha do tempo não pode ter buracos nem sobreposições)" if j > 1 else ""))
+        if end <= cursor:
+            raise ValueError(f"{w}: termina em {end:g} s, antes de começar")
+        if end - cursor > MAX_BEAT_S + 0.05:
+            raise ValueError(f"{w}: trecho de {end - cursor:.1f} s; divida em trechos de no máximo {MAX_BEAT_S:g} s, descrevendo cada movimento")
+        action = _text(beat, "action", w)
+        if len(action) < 20:
+            raise ValueError(f'{w}: "action" curta demais; descreva corpo, mãos, olhar, expressão e boca de cada personagem visível')
+        out.append({"start_s": cursor, "end_s": end, "action": action})
+        cursor = end
+    if abs(cursor - duration) > 0.3:
+        raise ValueError(f"{where}: a linha do tempo termina em {cursor:g} s; precisa terminar em {duration:g} s (a duração do clipe)")
+    out[-1]["end_s"] = float(duration)
+    return out
+
+
+def validate_dialogue(raw, names: dict[str, str], duration: float, where: str, words_per_second: float = WORDS_PER_SECOND_DE) -> list[dict]:
+    """Falas com quem fala, o texto, o início e o fim. Uma pessoa por vez e tempo suficiente para dizer cada fala."""
+    if raw in (None, "", []):
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f'{where}: "dialogue" precisa ser uma lista')
+    out, cursor = [], 0.0
+    for j, line in enumerate(raw, 1):
+        w = f"{where}.dialogue[{j}]"
+        if not isinstance(line, dict):
+            raise ValueError(f"{w} não é um objeto")
+        said = _text(line, "speaker", w)
+        speaker = names.get(said.casefold())
+        if speaker is None:
+            raise ValueError(f'{w}: quem fala ("{said}") não é um personagem conhecido (use {sorted(names.values())})')
+        text = _text(line, "text", w)
+        start, end = _seconds(line, "start_s", w), _seconds(line, "end_s", w)
+        if end <= start or end > duration + 0.05:
+            raise ValueError(f"{w}: a fala vai de {start:g} a {end:g} s, fora do clipe de {duration:g} s")
+        if start < cursor - 0.05:
+            raise ValueError(f"{w}: começa em {start:g} s, antes de a fala anterior terminar ({cursor:g} s); só uma pessoa fala por vez")
+        words = count_words(text)
+        if (end - start) + 0.3 < words / (words_per_second * 1.3):
+            raise ValueError(f"{w}: {words} palavras em {end - start:.1f} s é rápido demais; reserve cerca de {words / words_per_second:.1f} s ou divida a fala entre clipes")
+        out.append({"speaker": speaker, "start_s": start, "end_s": min(end, float(duration)), "text": text,
+                    "delivery": _text(line, "delivery", w, required=False) or _text(line, "delivery_en", w, required=False)})
+        cursor = end
+    return out
+
+
 def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int, catalog: set[str] | None = None, min_total: int = 70,
                    max_total: int = 0, min_clips: int = 0) -> dict:
     scene_ids = {s["id"] for s in plan["scenes"]}
@@ -421,13 +558,11 @@ def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int, catalog: s
             raise ValueError(f'{where}: "duration_s" precisa ser um número') from None
         if not 1 <= duration <= max_clip:
             raise ValueError(f'{where}: "duration_s" = {duration} está fora de 1–{max_clip} s')
-        duration = snap_duration(duration, max_clip)   # o Grok só faz 6, 10 ou 15 s
+        timeline = validate_timeline(c.get("timeline"), duration, where)
+        lines = validate_dialogue(c.get("dialogue"), names, duration, where)
+        planned, duration = duration, snap_duration(duration, max_clip)   # o Grok só faz 6, 10 ou 15 s
         start = "previous_last_frame" if "previous" in str(c.get("start", "")).lower() and i > 1 else "scene_image"
-        speakers = []
-        for n in _strings(c, "speakers"):
-            if n.casefold() not in names:
-                raise ValueError(f'{where}: quem fala ("{n}") não é um personagem conhecido')
-            speakers.append(names[n.casefold()])
+        speakers = list(dict.fromkeys(line["speaker"] for line in lines))
         refs = _strings(c, "reference_images")
         if catalog is not None:
             unknown = [r for r in refs if r not in catalog]
@@ -437,8 +572,10 @@ def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int, catalog: s
                 raise ValueError(f'{where}: "reference_images" precisa ter de 1 a 3 ids diferentes')
             if not refs and start != "previous_last_frame":
                 raise ValueError(f'{where}: informe em "reference_images" a(s) imagem(ns) deste clipe (a primeira é o quadro inicial)')
-        clips.append({"n": i, "scene": scene, "cast": cast_of.get(scene, []), "duration_s": duration, "start": start, "reference_images": refs, "prompt": _text(c, "prompt", where),
-                      "speakers": speakers, "dialogue_de": _text(c, "dialogue_de", where, required=False),
+        clips.append({"n": i, "scene": scene, "cast": cast_of.get(scene, []), "duration_s": duration, "planned_s": planned, "start": start, "reference_images": refs,
+                      "prompt": _text(c, "prompt", where), "timeline": timeline, "camera": _text(c, "camera", where), "keep": _strings(c, "keep"),
+                      "ambient": _text(c, "ambient", where, required=False), "lines": lines, "language_en": "German",
+                      "speakers": speakers, "dialogue_de": "\n".join(f"{line['speaker']}: {line['text']}" for line in lines),
                       "dialogue_pt": _text(c, "dialogue_pt", where, required=False),
                       "continuity_pt": _text(c, "continuity_pt", where, required=False), "check_pt": _strings(c, "check_pt")})
     total = sum(c["duration_s"] for c in clips)

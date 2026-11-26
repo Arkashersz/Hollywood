@@ -15,6 +15,12 @@ const MODELS: { id: string; label: string }[] = [
   { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5' }, { id: 'claude-fable-5-2', label: 'Claude Fable 5.2' },
 ];
 const modelLabel = (id?: string | null) => MODELS.find((m) => m.id === (id ?? ''))?.label ?? id ?? MODELS[0].label;
+// Nível de esforço do Claude (o mesmo do chat): mais alto pensa mais, demora mais e gasta mais cota.
+const EFFORTS: { id: string; label: string }[] = [
+  { id: '', label: 'Esforço padrão do PC' }, { id: 'low', label: 'Baixo' }, { id: 'medium', label: 'Médio' },
+  { id: 'high', label: 'Alto' }, { id: 'xhigh', label: 'Extra alto' }, { id: 'max', label: 'Máximo' },
+];
+const effortLabel = (id?: string | null) => EFFORTS.find((e) => e.id === (id ?? ''))?.label ?? id ?? EFFORTS[0].label;
 const TABLES = ['projects', 'project_stages', 'artifacts', 'jobs', 'events', 'worker_heartbeats'];
 
 export function Studio({ db, session }: { db: SupabaseClient; session: Session }) {
@@ -119,7 +125,8 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
   const createSequel = useCallback(async (parentId: string, source: string, title: string, notes: string): Promise<string | null> => {
     const { data, error } = await db.rpc('create_sequel', { p_parent: parentId, p_source: source || null, p_title: title || null, p_notes: notes || null });
     if (error) { setNotice(`Não foi possível criar a continuação: ${error.message}`); return error.message; }
-    setNotice(source ? 'Continuação criada. O Claude analisa a parte 2 do original assim que o worker estiver online.' : 'Continuação criada. O Claude resume a história e propõe direções assim que o worker estiver online.');
+    const links = source ? source.split('\n').length : 0;
+    setNotice(links > 1 ? `Continuação criada. O Claude analisa os ${links} vídeos e junta tudo numa história só assim que o worker estiver online.` : source ? 'Continuação criada. O Claude analisa a parte 2 do original assim que o worker estiver online.' :'Continuação criada. O Claude resume a história e propõe direções assim que o worker estiver online.');
     await refresh();
     const created = data as { id?: string } | null;
     if (created?.id) setSelectedId(created.id);
@@ -222,6 +229,7 @@ function ProjectsView(props: {
   const [minScenes, setMinScenes] = useState(8);
   const [kind, setKind] = useState<'inspired' | 'clone'>('inspired');
   const [model, setModel] = useState('');
+  const [effort, setEffort] = useState('');
   const [texts, setTexts] = useState<Record<PlanKey, string>>({ character_images: '', character_sheets: '', scene_images: '', production: '' });
   const built = useMemo(() => buildPlan(texts), [texts]);
   const [stageId, setStageId] = useState<string | null>(null);
@@ -229,7 +237,8 @@ function ProjectsView(props: {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState('');
   const [sequelOpen, setSequelOpen] = useState(false);
-  const [sequelSource, setSequelSource] = useState('');
+  const [sequelSources, setSequelSources] = useState<string[]>(['']);   // um link por vídeo, na ordem da história
+  const sequelLinks = sequelSources.map((s) => s.trim()).filter(Boolean);
   const [sequelNotes, setSequelNotes] = useState('');
   const [sequelBusy, setSequelBusy] = useState(false);
   const [sequelError, setSequelError] = useState('');
@@ -240,12 +249,12 @@ function ProjectsView(props: {
   const heroItem = artifacts.find((a) => a.artifact_type === 'image' && a.storage_path);
   const heroUrl = heroItem?.storage_path ? urls[`${heroItem.storage_path}|${heroItem.updated_at}`] : undefined;
 
-  useEffect(() => { setStageId(null); setConfirmDelete(false); setDeleteError(''); setSequelOpen(false); setSequelSource(''); setSequelNotes(''); setSequelError(''); }, [project?.id]);
+  useEffect(() => { setStageId(null); setConfirmDelete(false); setDeleteError(''); setSequelOpen(false); setSequelSources(['']); setSequelNotes(''); setSequelError(''); }, [project?.id]);
 
   async function makeSequel() {
     if (!project) return;
     setSequelBusy(true); setSequelError('');
-    const error = await createSequel(project.id, sequelSource.trim(), '', sequelNotes.trim());
+    const error = await createSequel(project.id, sequelLinks.join('\n'), '', sequelNotes.trim());
     setSequelBusy(false);
     if (error) setSequelError(error);
   }
@@ -260,7 +269,7 @@ function ProjectsView(props: {
 
   async function create() {
     if (!source.trim()) return;
-    if (await call('create_project', { p_title: title, p_source: source, p_mode: kind, p_model: model || null }, kind === 'clone' ? 'Projeto criado (cópia fiel). A análise começa assim que o worker estiver online.' : 'Projeto criado. A análise começa assim que o worker estiver online.')) { setSource(''); setTitle(''); }
+    if (await call('create_project', { p_title: title, p_source: source, p_mode: kind, p_model: model || null, p_effort: effort || null }, kind === 'clone' ? 'Projeto criado (cópia fiel). A análise começa assim que o worker estiver online.' : 'Projeto criado. A análise começa assim que o worker estiver online.')) { setSource(''); setTitle(''); }
   }
 
   const storyProblem = !idea.trim() ? '' : seconds < 15 || seconds > 300 ? 'A duração precisa ficar entre 15 e 300 segundos.'
@@ -275,19 +284,19 @@ function ProjectsView(props: {
     : factoryRefs.length > 5 ? 'Informe no máximo 5 referências.' : '';
   async function createFactory() {
     if (factoryProblem) return;
-    if (await call('create_factory_project', { p_title: title, p_profile: { ...fx, references: factoryRefs }, p_model: model || null },
+    if (await call('create_factory_project', { p_title: title, p_profile: { ...fx, references: factoryRefs }, p_model: model || null, p_effort: effort || null },
       'Projeto criado na Fábrica de roteiros. A análise das referências começa assim que o worker estiver online; cada etapa para na sua aprovação.')) { setTitle(''); setFx((old) => ({ ...old, references: '' })); }
   }
 
   async function createStory() {
     if (!idea.trim() || storyProblem) return;
-    if (await call('create_story_project', { p_title: title, p_idea: idea, p_seconds: seconds, p_min_scenes: minScenes, p_model: model || null },
+    if (await call('create_story_project', { p_title: title, p_idea: idea, p_seconds: seconds, p_min_scenes: minScenes, p_model: model || null, p_effort: effort || null },
       'História criada. O briefing começa assim que o worker estiver online; cada etapa para na sua aprovação.')) { setIdea(''); setTitle(''); }
   }
 
   async function createFromPrompts() {
     if (!built.total || built.problem) return;
-    if (await call('create_project_from_plan', { p_title: title, p_source: source, p_plan: built.plan, p_model: model || null },
+    if (await call('create_project_from_plan', { p_title: title, p_source: source, p_plan: built.plan, p_model: model || null, p_effort: effort || null },
       `Projeto criado com ${built.total} prompt(s). A geração começa assim que o worker estiver online; cada etapa para na sua aprovação.`)) {
       setTexts({ character_images: '', character_sheets: '', scene_images: '', production: '' }); setTitle(''); setSource(''); setMode('link');
     }
@@ -321,10 +330,13 @@ function ProjectsView(props: {
         <button role="tab" aria-selected={mode === 'story'} className={mode === 'story' ? 'on' : ''} onClick={() => setMode('story')}><Sparkles size={15} /> Tenho uma ideia de história</button>
         <button role="tab" aria-selected={mode === 'prompts'} className={mode === 'prompts' ? 'on' : ''} onClick={() => setMode('prompts')}><SkipForward size={15} /> Já tenho os prompts</button>
       </div>
-      <label className="modelpick">
-        <span><b>Modelo do Claude neste projeto</b><small>Escreve roteiro, personagens e prompts. Imagens e vídeos seguem ChatGPT e Grok.</small></span>
-        <select value={model} onChange={(e) => setModel(e.target.value)}>{MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select>
-      </label>
+      <div className="modelpick">
+        <span><b>Modelo e esforço do Claude neste projeto</b><small>Escrevem análise, roteiro, personagens e prompts. Esforço mais alto pensa mais, demora mais e gasta mais cota. Imagens e vídeos seguem ChatGPT e Grok.</small></span>
+        <div className="modelselects">
+          <select aria-label="Modelo do Claude" value={model} onChange={(e) => setModel(e.target.value)}>{MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select>
+          <select aria-label="Nível de esforço" value={effort} onChange={(e) => setEffort(e.target.value)}>{EFFORTS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select>
+        </div>
+      </div>
       {mode === 'factory' && (
         <div className="importbox factorybox">
           <div className="importintro">
@@ -452,10 +464,12 @@ function ProjectsView(props: {
             <div className="detail">
               <div className="detailtop">
                 {heroUrl && <img className="hero" src={heroUrl} alt="" />}
-                <div className="herotext"><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{(project.part ?? 1) > 1 ? `Parte ${project.part} · ` : ''}{project.mode === 'clone' ? 'Cópia fiel · ' : ''}{project.mode === 'factory' ? `Fábrica · ${project.profile?.niche ?? ''} · ${project.profile?.min_s ?? '?'}–${project.profile?.max_s ?? '?'} s · mín. ${project.profile?.min_scenes ?? '?'} cenas · 9:16` : project.mode === 'story' ? `Ideia própria · ${project.target_seconds ?? '?'} s · mín. ${project.min_scenes ?? '?'} cenas` : (project.source_url ?? (project.parent_id ? 'continuação sem vídeo de referência' : ''))}</small>
+                <div className="herotext"><div className="eyebrow">{project.id.slice(0, 8).toUpperCase()}</div><h3>{project.title}</h3><small className="source">{(project.part ?? 1) > 1 ? `Parte ${project.part} · ` : ''}{project.mode === 'clone' ? 'Cópia fiel · ' : ''}{project.mode === 'factory' ? `Fábrica · ${project.profile?.niche ?? ''} · ${project.profile?.min_s ?? '?'}–${project.profile?.max_s ?? '?'} s · mín. ${project.profile?.min_scenes ?? '?'} cenas · 9:16` : project.mode === 'story' ? `Ideia própria · ${project.target_seconds ?? '?'} s · mín. ${project.min_scenes ?? '?'} cenas` : (project.source_url?.split('\n').join(' + ') ?? (project.parent_id ?'continuação sem vídeo de referência' : ''))}</small>
                   <label className="modelinline">Modelo: <select value={project.model ?? ''} onChange={(e) => call('set_project_model', { p_project_id: project.id, p_model: e.target.value || null }, `Modelo do projeto: ${modelLabel(e.target.value)} (vale a partir da próxima tarefa).`)}>
                     {MODELS.some((m) => m.id === (project.model ?? '')) ? null : <option value={project.model ?? ''}>{modelLabel(project.model)}</option>}
-                    {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select></label></div>
+                    {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select>
+                    <select aria-label="Nível de esforço do projeto" value={project.effort ?? ''} onChange={(e) => call('set_project_effort', { p_project_id: project.id, p_effort: e.target.value || null }, `Esforço do projeto: ${effortLabel(e.target.value)} (vale a partir da próxima tarefa).`)}>
+                      {EFFORTS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select></label></div>
                 <span className={`statuspill st-${projectState(project, stages).tone}`}>{projectState(project, stages).label}</span>
                 {!confirmDelete
                   ? <button className="ghost danger" onClick={() => setConfirmDelete(true)} title="Excluir este projeto"><Trash2 size={14} /> Excluir</button>
@@ -473,8 +487,17 @@ function ProjectsView(props: {
                       <div className="sequelform">
                         <b>Parte {(project.part ?? 1) + 1} da história</b>
                         <small>O Claude lê o roteiro e os personagens desta produção e escreve a continuação. Cada etapa continua parando para a sua aprovação.</small>
-                        <div className="createinput"><Link2 size={16} /><input value={sequelSource} onChange={(e) => setSequelSource(e.target.value)} aria-label="Link da parte seguinte do original" placeholder="Link da parte seguinte do vídeo original (opcional)" /></div>
-                        <small>{sequelSource.trim() ? 'Com link: o Claude analisa esse vídeo e continua a sua história seguindo o que acontece nele' + (project.mode === 'clone' ? ', em cópia fiel.' : '.') : 'Sem link: o Claude cria a continuação a partir da sua história e propõe três direções para você escolher.'}</small>
+                        {sequelSources.map((value, i) => (
+                          <div className="sequellink" key={i}>
+                            <div className="createinput"><Link2 size={16} /><input value={value} onChange={(e) => setSequelSources((old) => old.map((x, n) => (n === i ? e.target.value : x)))}
+                              aria-label={i === 0 ? 'Link da parte seguinte do original' : `Link do vídeo ${i + 1}`}
+                              placeholder={i === 0 ? 'Link da parte seguinte do vídeo original (opcional)' : `Link do vídeo ${i + 1}, o que vem depois na história`} /></div>
+                            {sequelSources.length > 1 && <button className="ghost" onClick={() => setSequelSources((old) => old.filter((_, n) => n !== i))} disabled={sequelBusy} aria-label={`Remover o vídeo ${i + 1}`} title="Remover este vídeo"><Trash2 size={14} /></button>}
+                          </div>
+                        ))}
+                        {sequelSources.length < MAX_SEQUEL_LINKS && <button className="ghost small" onClick={() => setSequelSources((old) => [...old, ''])} disabled={sequelBusy}><Plus size={14} /> Adicionar outro vídeo</button>}
+                        <small>{sequelLinks.length > 1 ? `Com ${sequelLinks.length} links: o Claude analisa os ${sequelLinks.length} vídeos, na ordem acima, e junta tudo numa única parte ${(project.part ?? 1) + 1}, com a história em sequência num só vídeo` + (project.mode === 'clone' ? ', em cópia fiel.' : '.')
+                          : sequelLinks.length ? 'Com link: o Claude analisa esse vídeo e continua a sua história seguindo o que acontece nele' + (project.mode === 'clone' ? ', em cópia fiel.' : '.') : 'Sem link: o Claude cria a continuação a partir da sua história e propõe três direções para você escolher.'}</small>
                         <textarea rows={3} value={sequelNotes} onChange={(e) => setSequelNotes(e.target.value)} aria-label="Ideias para a continuação" placeholder="Ideias para a continuação (opcional): o que você quer que aconteça, novos personagens, o tom…" />
                         <div className="sequelactions">
                           <button className="primary" onClick={makeSequel} disabled={sequelBusy}>{sequelBusy ? 'Criando…' : `Criar parte ${(project.part ?? 1) + 1}`} <ChevronRight size={16} /></button>
@@ -520,6 +543,8 @@ function ProjectsView(props: {
     </>
   );
 }
+
+const MAX_SEQUEL_LINKS = 5;
 
 type FactoryForm = { niche: string; language: string; audience: string; style: string; style_custom: string; min_s: number; max_s: number; min_scenes: number; scene_min_s: number; scene_max_s: number; audio: string; restrictions: string; references: string };
 const FACTORY_DEFAULTS: FactoryForm = { niche: 'Frutinhas animadas (novela das frutas)', language: 'pt-BR', audience: 'Público brasileiro de TikTok, todas as idades', style: '3d', style_custom: '', min_s: 90, max_s: 120, min_scenes: 12, scene_min_s: 6, scene_max_s: 10, audio: 'dialogos', restrictions: '', references: '' };
@@ -762,7 +787,9 @@ function localVideoUrl(item: Artifact, access: MediaAccess | null): string | und
   if (item.artifact_type !== 'video' || !item.content.local || !item.local_relative_path || !access) return undefined;
   const base = (SAME_PC ? access.local_url ?? access.public_url : access.public_url)?.replace(/\/$/, '');
   if (!base) return undefined;
-  return `${base}/v/${item.project_id}/${item.local_relative_path.split('/').map(encodeURIComponent).join('/')}?k=${encodeURIComponent(access.token)}`;
+  // `v` muda a cada vez que o worker regrava o vídeo (ajuste): o arquivo tem o mesmo nome, e sem isso o player
+  // e o navegador continuariam mostrando o vídeo antigo até um F5.
+  return `${base}/v/${item.project_id}/${item.local_relative_path.split('/').map(encodeURIComponent).join('/')}?k=${encodeURIComponent(access.token)}&v=${encodeURIComponent(item.updated_at)}`;
 }
 
 function LocalVideo({ item }: { item: Artifact }) {

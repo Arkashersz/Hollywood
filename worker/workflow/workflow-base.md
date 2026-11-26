@@ -44,6 +44,9 @@ Tudo é vertical **9:16**: imagens de personagem, de ambiente, de cena e vídeos
 
 - Descreve, em ordem, o que acontece durante o clipe: movimento dos personagens, expressões, objetos,
   efeitos e som ambiente, mais a câmera (lente, distância, ângulo e movimento explícitos).
+- O detalhe vai numa linha do tempo com horários (ex.: 0.0–0.6 s, 0.6–2.4 s), cada trecho dizendo o
+  que cada personagem visível faz com o corpo, qual mão, o olhar e a boca. Quem não fala fica de boca
+  fechada. O worker transforma isso nas travas do prompt (animação, câmera, fala, voz, visual e continuidade).
 - Não repita a aparência dos personagens (ela vem da imagem) e não invente objetos ou personagens novos.
 - As falas entram no clipe com o nome do personagem, na ordem em que são ditas.
 

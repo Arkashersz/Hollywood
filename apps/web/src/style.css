@@ -368,6 +368,9 @@ footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wr
 .sequelform { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface-2); }
 .sequelform small { color: var(--muted); }
 .sequelform textarea { width: 100%; border: 1px solid var(--line-strong); background: var(--bg); color: var(--text); border-radius: 8px; padding: 10px; font: inherit; resize: vertical; }
+.sequellink { display: flex; gap: 8px; align-items: center; }
+.sequellink .createinput { flex: 1; }
+.sequelform > .ghost.small { justify-self: start; }
 .sequelactions { display: flex; gap: 8px; flex-wrap: wrap; }
 .sequelactions .primary { min-height: 38px; padding: 0 16px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
 .partbadge { font-style: normal; font-size: 11px; margin-left: 8px; padding: 2px 7px; border-radius: 99px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--line-strong); }
@@ -396,3 +399,7 @@ footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wr
 .proposalbtns { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
 .proposalbtns button { text-align: left; justify-content: flex-start; gap: 8px; min-height: 44px; }
 .proposalbtns button.on { border-color: var(--accent); background: var(--surface); color: var(--accent); }
+.modelselects { display: flex; gap: 8px; flex-wrap: wrap; }
+.modelinline select + select { margin-left: 2px; }
+.modelinline { flex-wrap: wrap; max-width: 100%; }
+.modelinline select, .modelselects select { min-width: 0; max-width: 100%; }

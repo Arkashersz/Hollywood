@@ -91,3 +91,20 @@ def test_child_process_never_gets_an_api_key(tmp_path, monkeypatch):
     assert asyncio.run(ClaudeBrain(tmp_path, executable="claude").ask("oi")) == "ok"
     assert "ANTHROPIC_API_KEY" not in captured["env"] and "CLAUDE_CODE_SESSION_ID" not in captured["env"]
     assert captured["input"] == "oi" and captured["cwd"] == str(tmp_path)
+
+
+def test_project_effort_overrides_the_pc_default_and_extends_the_wait(tmp_path, monkeypatch):
+    monkeypatch.setattr(brain_module.config, "CLAUDE_EFFORT", "low")
+    monkeypatch.setattr(brain_module.config, "CLAUDE_TIMEOUT", 100)
+    seen = {}
+
+    async def runner(command, prompt, cwd, timeout):
+        seen.update(command=command, timeout=timeout)
+        return ok("pronto")
+    asyncio.run(ClaudeBrain(tmp_path, executable="claude", runner=runner, model="claude-opus-5-5", effort="high").ask("x"))
+    command = seen["command"]
+    assert command[command.index("--model") + 1] == "claude-opus-5-5" and command[command.index("--effort") + 1] == "high" and seen["timeout"] == 200
+    asyncio.run(ClaudeBrain(tmp_path, executable="claude", runner=runner).ask("x"))
+    assert seen["command"][seen["command"].index("--effort") + 1] == "low" and seen["timeout"] == 100, "sem escolha no projeto vale o padrão do PC"
+    asyncio.run(ClaudeBrain(tmp_path, executable="claude", runner=runner, effort="turbo").ask("x"))
+    assert seen["command"][seen["command"].index("--effort") + 1] == "low", "valor desconhecido não chega ao Claude Code"

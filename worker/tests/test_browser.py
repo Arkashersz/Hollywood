@@ -254,3 +254,15 @@ def test_attach_skips_the_camera_input_and_accepts_several_files(site, tmp_path)
         reply = await chat(browser, site).ask("ver anexos", [a, b])
         return reply
     assert "a.png" in with_browser(scenario) and "b.png" in with_browser(scenario)
+
+
+def test_grok_resends_when_the_first_send_only_reopened_an_old_video(site, tmp_path):
+    out = tmp_path / "clip.mp4"
+
+    async def scenario(browser):
+        info = await grok(browser, site).generate_video("[[ghost]] clip", None, out, duration_s=6)
+        page = await browser.page("grok")
+        return info, await page.evaluate("localStorage.getItem('sends')")
+    info, sends = with_browser(scenario)
+    assert out.is_file() and info["duration"] > 0
+    assert sends == "2", "o primeiro envio não gerou nada (voltou para um vídeo antigo): o worker enviou de novo"

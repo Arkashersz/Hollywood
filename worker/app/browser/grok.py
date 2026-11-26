@@ -100,17 +100,31 @@ class Grok:
         raise Blocked("UI_CHANGED", f"Só {shown} de {len(images)} imagem(ns) apareceu anexada na caixa do Grok ({', '.join(i.name for i in images)}); não enviei para não gerar sem elas.",
                       "Rode `python -m app.cli check` e ajuste `worker/selectors.json` (grok.file_input / grok.attachment).")
 
-    # --- geração ---------------------------------------------------------------------
-    async def generate_video(self, prompt: str, images: Path | list[Path] | None, out_path: Path, *, duration_s: int | None = None,
-                             timeout: int | None = None, slot: int = 0) -> dict:
-        """`images`: exatamente as imagens deste clipe, na ordem (a primeira é o quadro inicial). Nenhuma outra é anexada."""
-        images = [Path(i) for i in ([images] if isinstance(images, (str, Path)) else images or [])]
-        timeout = timeout or config.VIDEO_TIMEOUT
-        seconds = media.snap_duration(duration_s)
-        manual = f"Gere o clipe manualmente no Grok ({self.resolution or 'resolução padrão'}, {seconds} s) e salve em {out_path}."
-        page = await self.browser.page("grok" if slot == 0 else f"grok-{slot}")
-        await page.bring_to_front()
-        async with self._submit_lock:   # as opções do Grok não podem ser trocadas por outra aba entre conferir e enviar
+    # --- envio ---------------------------------------------------------------------------
+    async def _wait_ready_to_send(self, page, timeout: float = 90) -> None:
+        """Espera a seta de enviar ficar azul. O botão já aparece habilitado um instante antes de o Grok terminar de processar a imagem
+        e o texto; clicar nessa janela não gera nada: o Grok só leva a página para o último vídeo feito."""
+        loop = asyncio.get_event_loop()
+        end = loop.time() + timeout
+        while loop.time() < end:
+            ready = await page.evaluate(dom.SEND_READY, self.sel["send"])
+            if ready:
+                await asyncio.sleep(0.8)   # margem para o Grok terminar de registrar a imagem enviada
+                return
+            await asyncio.sleep(0.5)
+        raise Blocked("UI_CHANGED", "O botão de enviar do Grok não ficou pronto (a imagem anexada não terminou de subir ou a interface mudou).",
+                      "Rode `python -m app.cli check` e clique em Tentar novamente.")
+
+    @staticmethod
+    def _post_id(url: str) -> str | None:
+        found = re.search(r"/imagine/post/([0-9a-fA-F-]{36})", url or "")
+        return found.group(1).lower() if found else None
+
+    async def _submit(self, page, prompt: str, images: list[Path], seconds: int) -> set[str]:
+        """Abre o Grok, anexa, configura, escreve e envia. Confere que o envio gerou um vídeo NOVO (o Grok pode ignorar um envio cedo
+        demais e abrir de volta o último vídeo): se isso acontecer, repete o envio. Devolve os vídeos que já existiam na página."""
+        last_seen = ""
+        for attempt in range(1, 4):
             await common.open_service(page, self.url, self.sel, self.service)
             if self.sel.get("video_mode"):
                 mode = page.locator(self.sel["video_mode"]).first
@@ -123,8 +137,37 @@ class Grok:
             await self._apply_settings(page, seconds, bool(images))
             await common.write(page, self.sel, prompt, self.service)
             await self._assert_settings(page, seconds, bool(images))
-            before = {v["src"] for v in (await page.evaluate(dom.VIDEOS, self.sel))["videos"]}
+            await self._wait_ready_to_send(page)
+            seen = (await page.evaluate(dom.VIDEOS, self.sel))["videos"]
+            before = {v["src"] for v in seen}
             await common.send(page, self.sel, self.service)
+            # Um envio de verdade leva a uma postagem nova. Voltar para um vídeo que já existia = o Grok não gerou nada.
+            loop = asyncio.get_event_loop()
+            end = loop.time() + config.GROK_LANDING_SECONDS
+            landed = None
+            while loop.time() < end:
+                await asyncio.sleep(1)
+                landed = self._post_id(page.url)
+                if landed:
+                    break
+            last_seen = landed or last_seen
+            if landed is None or not any(landed in src.lower() for src in before):
+                return before
+        raise Blocked("UI_CHANGED", f"O Grok não gerou o vídeo: depois de enviar, abriu de novo um vídeo que já existia ({last_seen}), nas 3 tentativas.",
+                      "Confira no Chrome do worker se o Grok mostra algum aviso e clique em Tentar novamente.")
+
+    # --- geração ---------------------------------------------------------------------
+    async def generate_video(self, prompt: str, images: Path | list[Path] | None, out_path: Path, *, duration_s: int | None = None,
+                             timeout: int | None = None, slot: int = 0) -> dict:
+        """`images`: exatamente as imagens deste clipe, na ordem (a primeira é o quadro inicial). Nenhuma outra é anexada."""
+        images = [Path(i) for i in ([images] if isinstance(images, (str, Path)) else images or [])]
+        timeout = timeout or config.VIDEO_TIMEOUT
+        seconds = media.snap_duration(duration_s)
+        manual = f"Gere o clipe manualmente no Grok ({self.resolution or 'resolução padrão'}, {seconds} s) e salve em {out_path}."
+        page = await self.browser.page("grok" if slot == 0 else f"grok-{slot}")
+        await page.bring_to_front()
+        async with self._submit_lock:   # as opções do Grok não podem ser trocadas por outra aba entre conferir e enviar
+            before = await self._submit(page, prompt, images, seconds)
 
         # Só interessa o vídeo NOVO (não estava na página antes do envio) com a duração e a resolução pedidas.
         min_side = int(re.sub(r"\D", "", self.resolution) or 0) * 0.97 if self.resolution else 0

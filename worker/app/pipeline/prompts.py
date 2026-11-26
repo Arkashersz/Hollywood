@@ -51,8 +51,22 @@ CLONE_ANALYSIS = """
 DOSSIER_MARK = "## 15. Dossiê de estilo"
 
 
+VIDEO_MARK = re.compile(r"^# Vídeo (\d+) de \d+[ \t]*$", re.M)
+
+
+def split_by_video(markdown: str | None) -> tuple[str, dict[int, str]]:
+    """Documento de vários vídeos de referência: (o que vem antes do primeiro vídeo, {número: trecho daquele vídeo})."""
+    pieces = VIDEO_MARK.split(markdown or "")
+    return pieces[0].strip(), {int(n): body.strip() for n, body in zip(pieces[1::2], pieces[2::2])}
+
+
 def clone_dossier(doc01_md: str) -> str:
-    """Seção 15 da ficha (estilo de animação, design, expressões, câmera…), que o remake herda inteira."""
+    """Seção 15 da ficha (estilo de animação, design, expressões, câmera…), que o remake herda inteira.
+    Com vários vídeos de referência, junta o dossiê de cada um."""
+    videos = split_by_video(doc01_md)[1]
+    if videos:
+        found = [(n, clone_dossier(body)) for n, body in sorted(videos.items())]
+        return "\n\n".join(f"### Dossiê do vídeo {n}\n\n{text}" for n, text in found if text)
     m = re.search(r"^#{2,3}\s*(?:15[.\s]|.*Dossiê de estilo)", doc01_md, re.M)
     return doc01_md[m.start():].strip() if m else ""
 
@@ -171,11 +185,13 @@ def evidence_block(evidence: dict) -> str:
     return data("evidencias", json.dumps(slim, ensure_ascii=False, indent=1)) + "\n\n" + data("transcricao", transcript_lines(evidence))
 
 
-def doc01(evidence: dict, previous: str | None, feedback: str | None, clone: bool = False) -> str:
+def doc01(evidence: dict, previous: str | None, feedback: str | None, clone: bool = False, video: tuple[int, int] | None = None) -> str:
+    one_of = (f"\nEste é o vídeo {video[0]} de {video[1]} que depois serão unidos, nesta ordem, em um único vídeo. Analise só este. "
+              "Se houver ajustes do usuário sobre outro vídeo, ignore-os aqui.\n") if video else ""
     return f"""{CLONE_BASE if clone else BASE}
 
 TAREFA: você é o ANALISTA. Analise o vídeo de referência a partir das imagens anexadas e dos dados abaixo. Somente análise: não escreva roteiro novo nem proponha adaptação.
-
+{one_of}
 Imagens (lista no fim deste pedido), todas com o tempo escrito no canto de cada quadro:
 - "folha-gancho": os primeiros 4 s, quadro a quadro (4 quadros por segundo) — use para o gancho;
 - "folha-1s": o vídeo inteiro, um quadro por segundo;
@@ -229,11 +245,48 @@ Seções:
 {MD_OUT}"""
 
 
-def sequel_block(sequel: dict | None) -> str:
+def merge_refs(videos: list[tuple[str, str]], sequel: dict | None, clone: bool, previous: str | None, feedback: str | None) -> str:
+    """Vários vídeos de referência: o Claude planeja como virar uma história só, em um único vídeo."""
+    total = len(videos)
+    docs = "\n\n".join(data(f"video-{n}-ficha", ficha) + "\n\n" + data(f"video-{n}-edicao", edit) for n, (ficha, edit) in enumerate(videos, 1))
+    notes = f"\nIdeias do usuário para esta parte (prioridade alta): {sequel['notes']}\n" if sequel and sequel.get("notes") else ""
+    keep = ("Modo cópia fiel: entram TODOS os planos de todos os vídeos, na ordem; só saem recapitulações, chamadas para ação e telas de \"parte seguinte\" que ficariam no meio."
+            if clone else "Entram todos os acontecimentos-chave de todos os vídeos, na ordem; saem repetições, recapitulações e chamadas para ação que ficariam no meio.")
+    return f"""{CLONE_BASE if clone else BASE}
+
+TAREFA: você é o ANALISTA. O usuário escolheu {total} vídeos de referência, em ordem, para virarem UM ÚNICO vídeo com a história sequencial completa (não são {total} vídeos nem {total} opções). Abaixo estão as análises de cada um. Escreva o plano de união para o roteirista, sem escrever o roteiro.
+{keep}
+{notes}
+{docs}
+
+Seções:
+## U1. Linha do tempo única — tabela com todos os beats na ordem do vídeo final: nº · vídeo de origem · tempo no original · acontecimento · função na história unificada.
+## U2. Emendas — para cada passagem de um vídeo para o seguinte: o que é cortado (final, CTA, recapitulação, gancho de abertura) e como a história segue sem quebra.
+## U3. Gancho e final do vídeo único — o gancho de abertura e o final, dizendo de qual vídeo vem cada um.
+## U4. Duração — duração de cada original, a soma e a estimativa do vídeo único.
+## U5. Edição do vídeo único — ritmo, transições, texto na tela e áudio que valem para o vídeo todo.
+## U6. Diferenças e dúvidas — personagens, locais ou fatos que não batem entre os vídeos e o que perguntar ao usuário.
+{revision(previous, feedback)}
+{MD_OUT}"""
+
+
+def _merged_reference(sequel: dict, clone: bool) -> str:
+    part, total = sequel["part"], sequel["refs"]
+    text = (f"Há {total} vídeos de referência do original (Documentos 01 e 02; o Documento 01 começa com o plano de união), na ordem da história. "
+            f"Escreva UM ÚNICO roteiro, para um só vídeo (a PARTE {part} do usuário), que percorre os {total} vídeos em sequência, do 1 ao {total}, sem pular nenhum nem inverter a ordem. "
+            "Na passagem de um vídeo para o outro a história segue direto: sem recapitulação, sem novo gancho de abertura, sem despedida, \"Teil\" ou chamada para ação no meio. ")
+    if clone:
+        return text + ("Entram todos os planos de todos os vídeos, numerados em sequência; onde este pedido fala em \"original\", entenda os vídeos em sequência, "
+                       "e a duração é a soma deles menos as emendas cortadas.")
+    return text + (f"Siga os acontecimentos-chave, o ritmo e a estrutura deles, aplicados aos personagens e à situação da história do usuário. Não copie falas. "
+                   "DURAÇÃO (substitui a meta de 75–95 s): use o tempo necessário para contar tudo, acima de 70 s e no máximo a soma das durações dos vídeos de referência; mostre a conta.")
+
+
+def sequel_block(sequel: dict | None, clone: bool = False) -> str:
     """Contexto de continuação (parte 2, 3…): a história até aqui e o que o usuário pediu. Vazio quando o projeto não é continuação."""
     if not sequel:
         return ""
-    ref = ("Há um vídeo de referência da PARTE %d do original (Documentos 01 e 02): ele mostra o que acontece nessa parte e como ela é filmada e editada. "
+    ref = _merged_reference(sequel, clone) if sequel.get("refs", 0) > 1 else ("Há um vídeo de referência da PARTE %d do original (Documentos 01 e 02): ele mostra o que acontece nessa parte e como ela é filmada e editada. "
            "Continue a história do usuário seguindo a ESTRUTURA, os acontecimentos-chave, o ritmo e o gancho desse vídeo, mas aplicados aos personagens e à situação da história do usuário. "
            "Não copie falas." % sequel["part"]) if sequel.get("has_ref") else (
            "Não há vídeo de referência para esta parte: invente a continuação com liberdade criativa, mantendo o tom, o ritmo e o estilo de edição da parte anterior (Documento 02).")
@@ -361,7 +414,7 @@ def doc03(doc01_md: str, doc02_md: str, max_clip: int, previous: str | None, fee
         return CLONE_BASE + "\n\n" + CLONE_SCRIPT.format(
             doc01=data('documento-01-ficha-da-referencia', doc01_md), doc02=data('documento-02-edicao-da-referencia', doc02_md),
             rules=CLONE_RULES + "\n- Use a seção 15 (dossiê de estilo) da ficha: as falas mantêm o mesmo jeito de falar, o mesmo humor e os mesmos tiques; as ações mantêm o mesmo comportamento e as mesmas expressões; a coluna Câmera copia a assinatura de câmera do dossiê.\n- Gancho e final do original são copiados fielmente. Na seção de dúvidas acrescente \"Avaliação do gancho e do final\": nota de 1 a 10 para o gancho (3 s) e para o final do original, por choque, curiosidade e vontade de ver a parte 2; se algum tiver nota abaixo de 8, sugira (sem aplicar) uma versão mais forte para o usuário decidir.\n" + f"- O Grok gera clipes de exatamente 6, 10 ou 15 s (máximo {max_clip} s por clipe); um plano mais longo vira clipes encadeados (\"7a\", \"7b\").",
-            revision=sequel_block(sequel) + revision(previous, feedback), md_out=MD_OUT)
+            revision=sequel_block(sequel, clone=True) + revision(previous, feedback), md_out=MD_OUT)
     return f"""{BASE}
 
 TAREFA: você é o ROTEIRISTA. Escreva o melhor roteiro INSPIRADO na referência, em alemão.
@@ -496,7 +549,7 @@ TAREFA: você é o EDITOR. Escreva os prompts de vídeo (image-to-video) de cada
 {dossier_block(clone, doc01_md)}
 {"Em cada prompt de clipe aplique o ANIMATION AND CAMERA BLOCK do dossiê (15.8): mesmo movimento, mesma câmera, mesmas expressões e mesma atuação do original." if clone and doc01_md and clone_dossier(doc01_md) else ""}
 Cenas com imagem-base aprovada: {json.dumps(scenes, ensure_ascii=False)}
-Personagens (use estes nomes exatamente em "speakers"): {json.dumps(names, ensure_ascii=False)}
+Personagens (use estes nomes exatamente em "dialogue"."speaker"): {json.dumps(names, ensure_ascii=False)}
 Imagens aprovadas que podem ser anexadas ao clipe (use os ids exatamente em "reference_images"): {json.dumps({k: v["label"] for k, v in (catalog or {}).items()}, ensure_ascii=False)}
 
 Devolva este objeto:
@@ -508,20 +561,39 @@ Devolva este objeto:
    "duration_s": 6,
    "start": "scene_image (começa na imagem-base da cena) ou previous_last_frame (continua do último quadro do clipe anterior)",
    "reference_images": ["ids das imagens a anexar neste clipe, na ordem; a PRIMEIRA é o quadro inicial (normalmente 'cena-<id>'); no máximo 3; o worker anexa exatamente estas e nenhuma outra. Use [] só se start for previous_last_frame e nenhuma outra imagem for necessária"],
-   "prompt": "em INGLÊS, pronto para colar: movimento dos personagens, câmera, objetos, expressões, efeitos e som ambiente, em ordem. Falas em ALEMÃO entre aspas, dizendo quem fala. Não descreva a aparência (ela vem da imagem inicial) nem a voz (é acrescentada automaticamente).",
-   "speakers": ["quem fala neste clipe"],
-   "dialogue_de": "falas do clipe em alemão (vazio se não houver)",
-   "dialogue_pt": "tradução",
+   "prompt": "em INGLÊS, 1 ou 2 frases: o resumo do que acontece no clipe (o detalhe vai em timeline). Sem falas e sem aparência.",
+   "timeline": [{{"start_s": 0.0, "end_s": 0.6, "action": "em INGLÊS: o que CADA personagem visível faz neste trecho (corpo, pés, mãos, olhar, expressão, boca)"}}, {{"start_s": 0.6, "end_s": 2.4, "action": "..."}}],
+   "camera": "em INGLÊS: lente, distância, ângulo, altura e movimento com início e fim no tempo",
+   "dialogue": [{{"speaker": "nome exato", "text": "fala em ALEMÃO, exatamente como no roteiro", "start_s": 0.8, "end_s": 2.4, "delivery": "em INGLÊS: emoção, volume e ritmo"}}],
+   "keep": ["em INGLÊS: o que não muda no clipe (objetos e em qual mão, posições, portas, luzes)"],
+   "ambient": "em INGLÊS: sons do ambiente e efeitos, sem música",
+   "dialogue_pt": "tradução das falas, na ordem",
    "continuity_pt": "como se liga ao clipe anterior e ao seguinte",
    "check_pt": ["o que conferir ao receber o clipe: rosto, mãos, voz, texto na tela"]
   }}
  ]
 }}
 
-Regras: um ou mais clipes por cena, na ordem da edição; cada "duration_s" é UM destes valores: {', '.join(str(o) for o in (6, 10, 15) if o <= max_clip)} (o Grok só gera essas durações; escolha a menor que comporta as falas e a ação do clipe); {"a soma das durações deve bater com a duração do roteiro (que copia a do original); copie no prompt de cada clipe o movimento de câmera exato descrito na coluna Câmera do roteiro." if clone else (f"a soma das durações deve ficar entre {story['target_s']} e {story['target_s'] + 6} segundos (duração pedida pelo usuário: {story['target_s']} s), com pelo menos {story['min_scenes']} clipes, e bater com o roteiro." if story else "a soma das durações deve ficar ACIMA de 70 segundos e bater com o roteiro.")} Cada clipe precisa dizer a duração e quais imagens anexar; escolha para cada clipe só as imagens que ele realmente usa. Não invente nomes de botões ou recursos do Grok.
+Regras: um ou mais clipes por cena, na ordem da edição; cada "duration_s" é UM destes valores: {', '.join(str(o) for o in (6, 10, 15) if o <= max_clip)} (o Grok só gera essas durações; escolha a menor que comporta as falas e a ação do clipe); {"a soma das durações deve bater com a duração do roteiro (que copia a do original); copie no campo camera o movimento de câmera exato descrito na coluna Câmera do roteiro e, na timeline, a ação de cada plano do original." if clone else (f"a soma das durações deve ficar entre {story['target_s']} e {story['target_s'] + 6} segundos (duração pedida pelo usuário: {story['target_s']} s), com pelo menos {story['min_scenes']} clipes, e bater com o roteiro." if story else "a soma das durações deve ficar ACIMA de 70 segundos e bater com o roteiro.")} Cada clipe precisa dizer a duração e quais imagens anexar; escolha para cada clipe só as imagens que ele realmente usa. Não invente nomes de botões ou recursos do Grok.
+
+{lock_rules(2.5)}
+
 {"" if clone else HOOK_CLIP}{chr(10) + HOOK_CLIP_STORY if story else ""}
 {revision(previous, feedback)}
 {JSON_OUT}"""
+
+
+def lock_rules(words_per_second: float, dialogue_key: str = "dialogue") -> str:
+    """Como o Claude descreve cada clipe para o worker montar as travas (animação, câmera, falas, voz, visual e continuidade)."""
+    return f"""TRAVAS DO VÍDEO (obrigatórias; com elas o worker monta o prompt final com ANIMATION LOCK, CAMERA LOCK, DIALOGUE LOCK, VOICE LOCK, DESIGN LOCK e CONTINUITY LOCK, e confere o formato antes de aceitar):
+1. "timeline" — a animação INTEIRA do clipe, em INGLÊS, em trechos com tempo: [{{"start_s": 0.0, "end_s": 0.6, "action": "..."}}, ...]. Começa em 0.0; cada trecho começa exatamente onde o anterior termina; o último termina na duração do clipe; nenhum trecho passa de 3 s (gesto rápido ganha trecho curto, ex.: 0.0–0.6 s).
+2. Em CADA trecho, para CADA personagem visível, descreva: corpo e pés (parado, anda quantos passos e para onde, vira para onde, senta, levanta), braços e QUAL mão faz o quê (gesto exato), cabeça e direção do olhar, expressão facial e o estado da boca ("speaks line 1, lips in sync" ou "mouth closed, silent"). Ações simultâneas ficam juntas no mesmo trecho. Exemplo: "Anna walks two slow steps toward the camera while speaking line 1, right hand open palm-up at chest height, eyebrows raised, eyes on Max; Max stands still at screen left, mouth closed, eyes following her, small nod at 2.0 s."
+3. Verbos concretos, com direção (screen left/right, toward/away from camera), distância e velocidade; nada vago ("moves around", "reacts", "does something funny"). O primeiro trecho parte da pose exata da imagem inicial; o último termina numa pose estável que o clipe seguinte consegue continuar. Efeitos e objetos que mudam (algo cai, quebra, acende) aparecem no trecho em que acontecem.
+4. "{dialogue_key}" — cada fala com "speaker" (nome exato), "text" (a fala exata), "start_s" e "end_s" (quando é dita, dentro do clipe) e "delivery" (em INGLÊS: emoção, volume, ritmo, ex.: "whispering, scared, fast"). Uma pessoa por vez, sem sobreposição; reserve cerca de {words_per_second:g} palavras por segundo. Enquanto alguém fala, todos os outros ficam de boca fechada e em silêncio (reagem só com olhar, sobrancelhas, cabeça e corpo), e a timeline diz isso. Clipe sem fala: "{dialogue_key}": [].
+5. "camera" — em INGLÊS: lente, distância, ângulo, altura e o movimento exato com início e fim no tempo (ex.: "35mm lens, medium shot at eye level, slow push-in from 0.0 to 4.0 s, then locked"), ou "locked-off static camera".
+6. "keep" — lista em INGLÊS do que não pode mudar no clipe: cada objeto (quem segura e em qual mão, ou onde está), a posição de cada personagem no quadro, portas, luzes e itens do cenário. Nada aparece, some, duplica ou muda de cor sem a timeline mostrar; ninguém entra ou sai sem a timeline mostrar; ninguém troca de roupa.
+7. "ambient" — em INGLÊS: sons do ambiente e efeitos sonoros, sem música (a música entra na edição).
+Não descreva a aparência nem a voz dos personagens: o worker cola em cada clipe a descrição fixa e a voz aprovadas de cada um."""
 
 
 HOOK_CLIP = """GANCHO E FINAL NOS CLIPES (obrigatório):

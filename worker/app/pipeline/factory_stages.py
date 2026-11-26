@@ -13,7 +13,7 @@ import asyncio
 from .. import media
 from ..errors import Blocked
 from . import factory, render
-from .core import Ctx, ask_json, strip_leading_title
+from .core import Ctx, ask_json, carry_changes, strip_leading_title
 
 MAX_ATTACHMENTS = 16
 FACTORY_ORDER = ["f_refs", "f_proposals", "f_script", "f_bible", "f_workflow", "character_sheets", "scene_images", "production"]
@@ -141,6 +141,8 @@ async def factory_bible(ctx: Ctx) -> dict:
     data = await ask_json(ctx.brain, factory.bible(profile, script, _previous_data(ctx, "factory"), ctx.feedback), lambda raw: factory.validate_factory(raw, profile, script))
     bible = data.pop("bible")
     ctx.save_data("factory", data)
+    if ctx.data_path("bible").is_file():   # refazer o texto não apaga o que o usuário já ajustou nas imagens
+        carry_changes(bible, ctx.load_data("bible"), "characters")
     ctx.save_data("bible", bible)   # mesmo formato que as etapas de imagem e vídeo leem
     ctx.write_doc("F5", factory.doc_factory(profile, script, data))
     visible = len(render.visible(bible))
@@ -159,6 +161,8 @@ async def factory_workflow(ctx: Ctx) -> dict:
                         lambda raw: factory.validate_workflow(raw, profile, script, data))
     plan, clips = factory.plan_and_clips(profile, data, wf, media.snap_duration)
     ctx.save_data("workflow", wf)
+    if ctx.data_path("plan").is_file():
+        carry_changes(plan, ctx.load_data("plan"), "environments")
     ctx.save_data("plan", plan)
     ctx.save_data("clips", clips)
     ctx.write_doc("F6", factory.doc_workflow(profile, plan, clips, wf, data, lambda s: render.scene_prompt(bible, plan, s), lambda c: render.clip_prompt(bible, c)))

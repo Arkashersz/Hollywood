@@ -34,8 +34,8 @@ def has_no_body_stage(db, project: dict) -> bool:
 
 def story_of(project: dict) -> dict | None:
     """Projeto criado a partir de uma ideia de história: a ideia, a duração total e a quantidade mínima de cenas."""
-    if project.get("mode") != "story":
-        return None
+    if project.get("mode") != "story" or (project.get("parent_id") and not project.get("story_idea")):
+        return None   # a continuação de uma história não herda ideia nem duração: segue as regras da continuação
     return {"idea": project.get("story_idea") or "", "target_s": int(project.get("target_seconds") or 60), "min_scenes": int(project.get("min_scenes") or 1)}
 
 
@@ -87,7 +87,7 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
         db.finish_job(job["id"], "blocked", error_code=exc.code, error_message=exc.message)
         return
     ctx = Ctx(sequel=sequel, project_id=project["id"], source=project.get("source_url") or project.get("source_video_path") or "", dir=project_dir,
-              sink=sink, brain=brain_for(project_dir, project.get("model")), images=images, video=video, stage_key=stage["stage_key"], version=stage["current_version"],
+              sink=sink, brain=brain_for(project_dir, project.get("model"), project.get("effort")), images=images, video=video, stage_key=stage["stage_key"], version=stage["current_version"],
               feedback=inp.get("feedback"), max_clip=factory.MAX_CLIP_S if profile else config.GROK_MAX_CLIP_SECONDS, profile=profile, chosen=chosen, whisper_model=config.WHISPER_MODEL,
               language=config.REFERENCE_LANGUAGE, plan=project.get("import_plan"), clone=project.get("mode") == "clone", story=story_of(project), direct_sheets=has_no_body_stage(db, project), image_concurrency=config.IMAGE_CONCURRENCY, video_concurrency=config.VIDEO_CONCURRENCY,
               image_slots=(pools or {}).get("image"), video_slots=(pools or {}).get("video"), pilot_approved=bool((stage.get("payload") or {}).get("pilot_approved")),
@@ -97,10 +97,14 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
     try:
         if regen:
             if inp.get("items"):
-                await stages.regen_items(ctx, {str(i.get("item_key", "")): i.get("comment") for i in inp["items"]})
+                result = await stages.regen_items(ctx, {str(i.get("item_key", "")): i.get("comment") for i in inp["items"]})
             else:
-                await stages.regen_item(ctx, inp.get("item_key", ""), inp.get("comment"))
-            db.update_stage(stage["id"], status="pending_review", remove=("progress",))
+                result = await stages.regen_item(ctx, inp.get("item_key", ""), inp.get("comment"))
+            # Avisos de "desatualizado" são refeitos a cada ajuste; os demais avisos da etapa ficam como estavam.
+            kept = [w for w in (stage.get("payload") or {}).get("warnings") or [] if not str(w).startswith(stages.STALE_PREFIX)]
+            warnings = kept + list(result.get("warnings") or [])
+            db.update_stage(stage["id"], status="pending_review", remove=("progress",) + (() if warnings else ("warnings",)),
+                            patch={"warnings": warnings} if warnings else None)
         else:
             result = await stages.run_stage(ctx)
             db.update_stage(stage["id"], status="pending_review", submitted_at=now(), remove=("progress", "next_generation", "warnings", "pilot", "pilot_remaining", "chosen", "proposals", "recommended"),
@@ -171,7 +175,8 @@ async def main() -> None:
     sel = selectors.load(config.SELECTORS_FILE)
     images, video = ChatGPT(browser, sel), Grok(browser, sel)
     # Cérebro: Claude (padrão), uma conversa por tarefa na pasta do projeto. BRAIN=chatgpt usa o ChatGPT do navegador.
-    brain_for = (lambda project_dir, model=None: images) if config.BRAIN == "chatgpt" else (lambda project_dir, model=None: ClaudeBrain(project_dir, model=model))
+    brain_for = ((lambda project_dir, model=None, effort=None: images) if config.BRAIN == "chatgpt"
+                 else (lambda project_dir, model=None, effort=None: ClaudeBrain(project_dir, model=model, effort=effort)))
     print(f"Cérebro: {'ChatGPT (navegador)' if config.BRAIN == 'chatgpt' else 'Claude (Claude Code local)'} · imagens: ChatGPT · vídeos: Grok", flush=True)
     parallel = 1 if config.BRAIN == "chatgpt" else config.MAX_PARALLEL_JOBS   # com o ChatGPT como cérebro, a aba de texto é a mesma das imagens
     pools = {}

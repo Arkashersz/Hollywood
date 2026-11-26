@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from app import media
+from app import media, recover
 from app.errors import Blocked
-from app.pipeline import core, render, stages
+from app.pipeline import core, prompts, render, stages
 from app.pipeline.core import Ctx, LocalSink
 
 STYLE = "Stylized 3D cartoon render, warm palette, soft key light."
@@ -36,11 +36,23 @@ PLAN = {
 }
 
 
+def timeline(duration):
+    """Linha do tempo válida: trechos de até 2 s, de 0 até a duração."""
+    out, t = [], 0.0
+    while t < duration:
+        end = min(duration, t + 2)
+        out.append({"start_s": t, "end_s": end, "action": f"Anna takes one slow step toward the camera, right hand raised ({t:g} s)."})
+        t = end
+    return out
+
+
 def clips_payload(n=12, duration=6):
     return {"order_note_pt": "Em ordem.", "clips": [
         {"scene": "01" if i % 2 == 0 else "02", "duration_s": duration, "start": "previous_last_frame" if i == 1 else "scene_image",
          "reference_images": ["folha-anna"] if i == 1 else ["cena-01" if i % 2 == 0 else "cena-02", "folha-anna"],
-         "prompt": f'Clip {i}: Anna says "Hallo".', "speakers": ["Anna"] if i % 2 == 0 else [], "dialogue_de": "Hallo", "dialogue_pt": "Olá",
+         "prompt": f"Clip {i}: Anna greets the dog.", "timeline": timeline(min(duration, 6)), "camera": "35mm, medium shot at eye level, locked-off.",
+         "dialogue": [{"speaker": "Anna", "text": "Hallo", "start_s": 0.5, "end_s": 1.5, "delivery": "warm, soft"}] if i % 2 == 0 else [],
+         "keep": ["Anna holds the red mug in her right hand"], "ambient": "Kitchen hum.", "dialogue_pt": "Olá",
          "continuity_pt": "Segue.", "check_pt": ["rosto"]} for i in range(n)]}
 
 
@@ -375,7 +387,7 @@ def test_each_clip_attaches_exactly_the_images_claude_listed(project):
             expected.insert(0, "inicio-clipe-%02d.png" % clip["n"])
         assert call["images"] == expected, f"clipe {clip['n']}"
         assert call["duration_s"] == clip["duration_s"]
-        assert call["prompt"].startswith(clip["prompt"])
+        assert clip["prompt"] in call["prompt"]
     assert [c["out"] for c in video.calls] == [f"clipe-{n:02d}.mp4" for n in range(1, 13)]
     assert "folha-anna.png" in video.calls[2]["images"] and len(video.calls[2]["images"]) == 2
 
@@ -383,7 +395,7 @@ def test_each_clip_attaches_exactly_the_images_claude_listed(project):
 def test_clip_reference_ids_must_exist_and_be_listed():
     bible = {"characters": [{"name": "Anna", "slug": "anna", "voice_only": False}]}
     plan = {"scenes": [{"id": "01"}]}
-    base = {"scene": "01", "duration_s": 6, "start": "scene_image", "prompt": "p", "speakers": []}
+    base = {"scene": "01", "duration_s": 6, "start": "scene_image", "prompt": "p", "timeline": timeline(6), "camera": "Static."}
     catalog = {"cena-01", "folha-anna"}
     def run_validate(refs, n=13):
         return core.validate_clips({"clips": [{**base, "reference_images": refs} for _ in range(n)]}, bible, plan, 6, catalog)
@@ -490,7 +502,7 @@ def test_clone_mode_asks_for_a_faithful_copy_with_shot_map_swap_proposal_and_no_
     assert "Uma cena por plano do original" in llm.asks[-1]["prompt"]
     run(ctx, "scene_images")
     out = run(ctx, "video_prompts")   # clipes curtos: a regra de 70 s não vale na cópia fiel
-    assert any("copie no prompt de cada clipe o movimento de câmera" in a["prompt"] for a in llm.asks)
+    assert any("copie no campo camera o movimento de câmera" in a["prompt"] for a in llm.asks)
     assert out is not None
 
 
@@ -579,6 +591,42 @@ def test_sequel_with_a_link_analyzes_the_new_video_and_continues_the_story(proje
     assert "CONTINUAÇÃO · PARTE 2" in script and "PARTE 2 do original" in script and "Anna und der Hund" in script
 
 
+@pytest.mark.parametrize("clone", [False, True])
+def test_sequel_with_several_links_analyzes_each_video_and_writes_one_sequential_story(project, tmp_path, sample_video, clone):
+    projects_dir, parent_id = _finished_parent(project, tmp_path)
+    ctx, llm, _, sink = project
+    second = tmp_path / "episodio-5.mp4"
+    shutil.copy(sample_video, second)
+    ctx.project_id, ctx.dir, ctx.clone = "p2", projects_dir / "p2", clone
+    ctx.source = f"{sample_video}\n{second}"
+    ctx.sequel = core.sequel_context({"id": "p2", "parent_id": parent_id, "part": 2, "source_url": ctx.source}, projects_dir)
+    assert ctx.sequel["refs"] == 2
+    before = len(llm.asks)
+    out = run(ctx, "analysis")
+    asks = llm.asks[before:]
+    assert len(asks) == 5, "ficha e edição de cada vídeo, mais o plano de união"
+    assert "vídeo 1 de 2" in asks[0]["prompt"] and "vídeo 2 de 2" in asks[2]["prompt"] and asks[0]["files"] and asks[2]["files"]
+    assert "UM ÚNICO vídeo" in asks[4]["prompt"] and 'nome="video-2-ficha"' in asks[4]["prompt"]
+    doc01 = ctx.read_doc("01")
+    assert sorted(prompts.split_by_video(doc01)[1]) == [1, 2] and sorted(prompts.split_by_video(ctx.read_doc("02"))[1]) == [1, 2]
+    assert str(second) in doc01 and "2 vídeos" in out["summary"]
+    assert {"ev-v1-folha-1s-01", "ev-v2-folha-1s-01"} <= set(sink.media)
+    assert [p.key for p in recover._evidence(ctx.dir)] and {p.key for p in recover._evidence(ctx.dir)} == {k for k in sink.media if k.startswith("ev-v")}
+    run(ctx, "script")
+    script = llm.asks[-1]["prompt"]
+    assert "CONTINUAÇÃO · PARTE 2" in script and "UM ÚNICO roteiro" in script and "Anna und der Hund" in script
+    assert ("substitui a meta de 75–95 s" in script) is not clone
+    before = len(llm.asks)
+    run(ctx, "analysis", feedback="no vídeo 2 faltou o cachorro")   # revisão: cada vídeo recebe só a própria versão anterior
+    assert str(second) not in llm.asks[before]["prompt"].split("versao-anterior")[1] and str(second) in llm.asks[before + 2]["prompt"]
+
+
+def test_clone_dossier_gathers_the_dossier_of_every_reference_video():
+    doc = "## U1. Linha\n\nx\n\n# Vídeo 1 de 2\n\n## 14. Mapa\n\nm\n\n## 15. Dossiê de estilo\n\nestilo A\n\n# Vídeo 2 de 2\n\n## 14. Mapa\n\nsegredo\n\n## 15. Dossiê de estilo\n\nestilo B"
+    dossier = prompts.clone_dossier(doc)
+    assert "estilo A" in dossier and "estilo B" in dossier and "segredo" not in dossier
+
+
 def _child(project, parent_dir_ctx, notes=None):
     """Contexto de uma continuação (sem link) do projeto produzido em `project`."""
     ctx, llm, video, _ = project
@@ -636,7 +684,7 @@ def test_hook_ending_and_consistency_rules_reach_the_script_bible_and_clip_promp
     assert "GANCHO E FINAL NOS CLIPES" in clips_prompt and "Último clipe" in clips_prompt
     assert any("Gancho e final na edição" in p for p in asks) and any("Comentários" in p and "comentário fixado" in p for p in asks)
     clip = stages.items_for(ctx, "production")[0]
-    assert "Character consistency" in clip.prompt and "A 30-year-old woman, red coat." in clip.prompt
+    assert "DESIGN LOCK" in clip.prompt and "A 30-year-old woman, red coat." in clip.prompt
 
 
 def test_clone_keeps_the_original_hook_and_ending_but_asks_for_an_evaluation(project):
@@ -765,3 +813,207 @@ def test_clone_dossier_is_requested_and_inherited_by_bible_plan_and_clips(projec
     run(ctx, "scene_images"); run(ctx, "video_prompts")
     clips_prompt = next(a["prompt"] for a in llm.asks if "EDITOR" in a["prompt"] and "image-to-video" in a["prompt"])
     assert "Claymation com cadência em 2" in clips_prompt and "ANIMATION AND CAMERA BLOCK" in clips_prompt
+
+
+# ---------------------------------------------------------------------------
+# Ajustes: acumulam, partem da imagem atual e chegam às etapas seguintes
+# ---------------------------------------------------------------------------
+def adjust(ctx, stage, key, note):
+    ctx.stage_key = stage
+    return asyncio.run(stages.regen_item(ctx, key, note))
+
+
+def test_adjustment_edits_the_current_image_and_keeps_earlier_adjustments(project):
+    ctx, llm, _, _ = project
+    run_until(ctx, "character_images")
+    adjust(ctx, "character_images", "img-personagem-anna-corpo", "casaco mais escuro")
+    first = llm.images[-1]
+    assert first["refs"][0] == "personagem-anna-corpo.png", "a imagem de hoje vai como 1ª referência: o ajuste edita ela"
+    assert "EDIT MODE" in first["prompt"] and "Requested adjustment (from the user): casaco mais escuro" in first["prompt"]
+
+    adjust(ctx, "character_images", "img-personagem-anna-corpo", "cabelo ruivo")
+    second = llm.images[-1]
+    assert second["refs"][0] == "personagem-anna-corpo.png"
+    assert "1. casaco mais escuro" in second["prompt"], "o ajuste anterior não se perde no ajuste seguinte"
+    assert "Requested adjustment (from the user): cabelo ruivo" in second["prompt"]
+
+    adjust(ctx, "character_images", "img-personagem-anna-corpo", None)   # gerar de novo sem observação
+    third = llm.images[-1]
+    assert third["refs"] == [] and "EDIT MODE" not in third["prompt"]
+    assert "1. casaco mais escuro" in third["prompt"] and "2. cabelo ruivo" in third["prompt"], "refazer do zero também mantém o que já foi aprovado"
+
+
+def test_previous_version_of_an_adjusted_image_is_kept(project):
+    ctx, llm, _, _ = project
+    run_until(ctx, "character_images")
+    adjust(ctx, "character_images", "img-personagem-anna-corpo", "mais velha")
+    saved = list((ctx.dir / "imagens" / "_anteriores").glob("personagem-anna-corpo-*.png"))
+    assert len(saved) == 1
+
+
+def test_adjusted_look_reaches_scene_and_clip_prompts(project):
+    ctx, llm, video, _ = project
+    run_until(ctx, "character_sheets")
+    adjust(ctx, "character_sheets", "img-folha-anna", "cabelo ruivo")
+    adjust(ctx, "character_images", "img-personagem-anna-corpo", "casaco azul")
+    bible = ctx.load_data("bible")
+    anna = next(c for c in bible["characters"] if c["name"] == "Anna")
+    assert anna["approved_changes"] == ["cabelo ruivo", "casaco azul"] and anna["fixed_description"] == "A 30-year-old woman, red coat."
+    for stage in ("visual_plan", "scene_images", "video_prompts", "production"):
+        run(ctx, stage)
+    scene = next(i for i in llm.images if i["out"] == "cena-01.png")
+    assert "A 30-year-old woman, red coat. USER-APPROVED CHANGES" in scene["prompt"] and "cabelo ruivo; casaco azul" in scene["prompt"]
+    assert "cabelo ruivo; casaco azul" in video.calls[0]["prompt"], "o prompt de vídeo também descreve o personagem já ajustado"
+
+
+def test_adjusting_an_image_marks_what_was_made_from_it_and_rebuilds_it(project):
+    ctx, llm, video, _ = project
+    run_until(ctx, "production")
+    ctx.stage_key = "character_sheets"
+    result = asyncio.run(stages.regen_item(ctx, "img-folha-anna", "cabelo ruivo"))
+    assert result["warnings"][0].startswith(stages.STALE_PREFIX) and "Cena 01" in result["warnings"][0]
+    assert ctx.is_stale("img-cena-01") and ctx.is_stale("vid-clipe-01") and not ctx.is_stale("img-folha-b-ser-hund"), "só o que usa a folha da Anna"
+
+    before = len(llm.images)
+    run(ctx, "scene_images")   # a etapa refaz o que ficou desatualizado, a partir da folha nova
+    redone = llm.images[before:]
+    assert {i["out"] for i in redone} == {"cena-01.png", "cena-02.png"}, "as duas cenas usam a folha da Anna e só elas são refeitas"
+    scene = next(i for i in redone if i["out"] == "cena-01.png")
+    assert scene["refs"][0] == "folha-anna.png" and "EDIT MODE" not in scene["prompt"], "reconstrói das referências novas, não edita a cena antiga"
+    assert not ctx.is_stale("img-cena-01")
+    assert "cabelo ruivo" in scene["prompt"]
+
+
+def test_stale_item_adjusted_by_hand_is_rebuilt_not_edited(project):
+    ctx, llm, _, _ = project
+    run_until(ctx, "scene_images")
+    ctx.stage_key = "character_sheets"
+    asyncio.run(stages.regen_item(ctx, "img-folha-anna", "cabelo ruivo"))
+    assert ctx.is_stale("img-cena-01")
+    adjust(ctx, "scene_images", "img-cena-01", "mais luz")
+    scene = llm.images[-1]
+    assert scene["out"] == "cena-01.png" and scene["refs"][0] == "folha-anna.png", "desatualizada: parte da folha nova, sem usar a cena antiga como base"
+    assert "Requested adjustment (from the user): mais luz" in scene["prompt"]
+
+
+def test_revising_the_character_text_keeps_the_approved_image_changes(project):
+    ctx, llm, _, _ = project
+    run_until(ctx, "character_images")
+    adjust(ctx, "character_images", "img-personagem-anna-corpo", "óculos redondos")
+    run(ctx, "character_bible", feedback="Anna mais velha", version=2)
+    anna = next(c for c in ctx.load_data("bible")["characters"] if c["name"] == "Anna")
+    assert anna["approved_changes"] == ["óculos redondos"]
+
+
+def test_items_from_an_older_plan_are_pruned_and_do_not_break_adjustments(project):
+    ctx, llm, _, sink = project
+    run_until(ctx, "scene_images")
+    stale_png = ctx.dir / "imagens" / "ambientes" / "ambiente-antigo.png"
+    stale_png.write_bytes(b"x")
+    sink.file("scene_images", "img-ambiente-antigo", "Ambiente · antigo", stale_png, "image")
+    assert "img-ambiente-antigo" in sink.media
+
+    before = len(llm.images)
+    ctx.stage_key = "scene_images"
+    real = next(i.key for i in stages.items_for(ctx, "scene_images") if i.key.startswith("img-ambiente-"))
+    result = asyncio.run(stages.regen_items(ctx, {real: "mais luz", "img-ambiente-antigo": "mais luz"}))
+    assert len(llm.images) == before + 1, "o item que ainda existe é refeito; o antigo é ignorado, sem derrubar o pedido"
+    assert "img-ambiente-antigo" in result["warnings"][0]
+    assert "img-ambiente-antigo" not in sink.media and real in sink.media
+
+    with pytest.raises(Blocked):   # só itens que não existem: continua explicando o erro
+        asyncio.run(stages.regen_items(ctx, {"img-ambiente-antigo": "x"}))
+
+
+def test_adjusting_a_video_clip_regenerates_only_that_clip_and_keeps_the_stage_usable(project):
+    ctx, llm, video, _ = project
+    run_until(ctx, "production")
+    before = len(video.calls)
+    result = adjust(ctx, "production", "vid-clipe-01", "câmera mais lenta")
+    assert len(video.calls) == before + 1, "só o clipe pedido é refeito"
+    assert "câmera mais lenta" in video.calls[-1]["prompt"]
+    assert "summary" in result
+    again = adjust(ctx, "production", "vid-clipe-01", "sem zoom")
+    assert "câmera mais lenta" in video.calls[-1]["prompt"] and "sem zoom" in video.calls[-1]["prompt"], "ajustes de vídeo também acumulam"
+    assert len(video.calls) == before + 2 and "summary" in again
+
+
+# ---------------------------------------------------------------------------
+# Travas do vídeo: animação com horário, câmera, falas, silêncio, voz, visual e continuidade
+# ---------------------------------------------------------------------------
+def _two_people():
+    bible = {"style_block": "S.", "characters": [
+        {"name": "Anna", "voice_only": False, "fixed_description": "A 30-year-old woman, red coat.", "voice": {"descriptor_en": "Warm mid-range female voice."}},
+        {"name": "Max", "voice_only": False, "fixed_description": "A tall man, green scarf.", "voice": {"descriptor_en": "Deep calm male voice."}},
+        {"name": "Erzähler", "voice_only": True, "fixed_description": "voice only", "voice": {"descriptor_en": "Calm narrator voice."}}]}
+    plan = {"scenes": [{"id": "01", "environment": "Küche", "characters": ["Anna", "Max"]}]}
+    return bible, plan
+
+
+def _clip(**changes):
+    clip = {"scene": "01", "duration_s": 5, "start": "scene_image", "prompt": "Anna confronts Max.", "camera": "35mm, medium two-shot, slow push-in 0.0–4.0 s, then locked.",
+            "timeline": [{"start_s": 0, "end_s": 0.6, "action": "Anna inhales sharply, eyes wide on Max; Max still, mouth closed."},
+                         {"start_s": 0.6, "end_s": 3.0, "action": "Anna walks two steps toward Max while speaking line 1, right hand pointing; Max mouth closed, leans back."},
+                         {"start_s": 3.0, "end_s": 5.0, "action": "Max answers line 2, both hands raised palms out; Anna mouth closed, arms crossed."}],
+            "dialogue": [{"speaker": "Anna", "text": "Wo warst du gestern Nacht?", "start_s": 0.8, "end_s": 2.9, "delivery": "angry, loud"},
+                         {"speaker": "max", "text": "Ich kann es erklären!", "start_s": 3.1, "end_s": 4.8, "delivery": "panicked, fast"}],
+            "keep": ["Anna holds her phone in her left hand", "the kitchen door stays closed"], "ambient": "Fridge hum, rain on the window."}
+    clip.update(changes)
+    return clip
+
+
+def test_locked_clip_prompt_has_timestamps_silence_voice_design_and_continuity_locks():
+    bible, plan = _two_people()
+    clips = core.validate_clips({"clips": [_clip()]}, bible, plan, 15, min_total=0)
+    c = clips["clips"][0]
+    assert c["planned_s"] == 5 and c["duration_s"] == 6 and c["speakers"] == ["Anna", "Max"] and "Max: Ich kann es erklären!" in c["dialogue_de"]
+    p = render.clip_prompt(bible, c)
+    for section in ("ANIMATION LOCK", "CAMERA LOCK", "DIALOGUE LOCK", "SPEAKING RULE", "VOICE LOCK", "DESIGN LOCK", "CONTINUITY LOCK", "AVOID"):
+        assert section in p, section
+    assert "- 0.0–0.6 s: Anna inhales" in p and "- 3.0–5.0 s: Max answers" in p
+    assert "- 5.0–6.0 s: everyone holds the final pose" in p, "o Grok gera 6 s: o segundo que sobra fica parado"
+    assert '- 0.8–2.9 s · Anna: "Wo warst du gestern Nacht?" — delivery: angry, loud' in p and "spoken in German" in p
+    assert "keeps the mouth CLOSED" in p and "Silent for the whole clip" not in p
+    assert "- Anna: Warm mid-range female voice." in p and "- Max: Deep calm male voice." in p and "Calm narrator" not in p
+    assert "A tall man, green scarf." in p and "Anna holds her phone in her left hand" in p and "No background music" in p
+
+
+def test_silent_characters_and_off_screen_voices_are_locked_too():
+    bible, plan = _two_people()
+    narrated = _clip(dialogue=[{"speaker": "Erzähler", "text": "Niemand wusste es.", "start_s": 1, "end_s": 2.5}], timeline=_clip()["timeline"][:2] + [
+        {"start_s": 3.0, "end_s": 6.0, "action": "Both freeze, mouths closed, staring at the door; camera holds."}], duration_s=6)
+    c = core.validate_clips({"clips": [narrated]}, bible, plan, 15, min_total=0)["clips"][0]
+    p = render.clip_prompt(bible, c)
+    assert "Erzähler (off-screen voice; no on-screen mouth moves)" in p and "Silent for the whole clip, mouth closed: Anna, Max." in p
+    mute = core.validate_clips({"clips": [_clip(dialogue=[])]}, bible, plan, 15, min_total=0)["clips"][0]
+    assert "this clip has NO dialogue" in render.clip_prompt(bible, mute) and "VOICE LOCK" not in render.clip_prompt(bible, mute)
+
+
+@pytest.mark.parametrize("change, message", [
+    ({"timeline": None}, "timeline"),
+    ({"timeline": [{"start_s": 0, "end_s": 2, "action": "Anna turns her head slowly to the left."},
+                   {"start_s": 2.5, "end_s": 5, "action": "Anna turns her head slowly to the right."}]}, "buracos"),
+    ({"timeline": [{"start_s": 0, "end_s": 5, "action": "Anna turns her head slowly to the left."}]}, "no máximo 3 s"),
+    ({"timeline": [{"start_s": 0, "end_s": 2, "action": "Anna moves."}, {"start_s": 2, "end_s": 5, "action": "Anna turns her head to the right."}]}, "curta demais"),
+    ({"timeline": [{"start_s": 0, "end_s": 2, "action": "Anna turns her head slowly to the left."}]}, "precisa terminar em 5"),
+    ({"dialogue": [{"speaker": "Anna", "text": "Hallo du da", "start_s": 0.5, "end_s": 2.5}, {"speaker": "Max", "text": "Was?", "start_s": 2.0, "end_s": 3.0}]}, "só uma pessoa fala por vez"),
+    ({"dialogue": [{"speaker": "Anna", "text": "Das ist eine sehr lange Rede mit vielen Worten hier", "start_s": 0.5, "end_s": 1.0}]}, "rápido demais"),
+    ({"dialogue": [{"speaker": "Fremder", "text": "Hallo", "start_s": 0.5, "end_s": 1.5}]}, "não é um personagem conhecido"),
+    ({"dialogue": [{"speaker": "Anna", "text": "Hallo", "start_s": 4.5, "end_s": 6.0}]}, "fora do clipe"),
+    ({"camera": ""}, "camera"),
+])
+def test_clip_locks_are_checked_before_they_reach_the_video(change, message):
+    bible, plan = _two_people()
+    with pytest.raises(ValueError, match=message):
+        core.validate_clips({"clips": [_clip(duration_s=5, **change)]}, bible, plan, 15, min_total=0)
+
+
+def test_editor_is_asked_for_every_lock_and_old_clips_keep_their_prompt(project):
+    ctx, llm, video, _ = project
+    run_until(ctx, "production")
+    editor = next(a["prompt"] for a in llm.asks if "você é o EDITOR" in a["prompt"])
+    for marker in ("TRAVAS DO VÍDEO", '"timeline"', "QUAL mão", "boca fechada", '"keep"', '"camera"', "delivery"):
+        assert marker in editor, marker
+    assert "ANIMATION LOCK" in video.calls[0]["prompt"] and "SPEAKING RULE" in video.calls[0]["prompt"]
+    old = {"prompt": "Anna waves.", "speakers": [], "duration_s": 6}
+    assert render.clip_prompt({"characters": []}, old) == "Anna waves.\n\nDuration: 6 seconds. Vertical 9:16.", "projetos já planejados não mudam"

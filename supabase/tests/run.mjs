@@ -406,4 +406,26 @@ await as(A);
 await fails(`insert into worker_media(worker_id, token) values ('x', 'y')`, [], /row-level security|permission denied/);
 step('worker_media: só o dono lê a senha dos vídeos e o painel não escreve');
 
+// nível de esforço do Claude por projeto
+await as(A);
+const [ef1] = await q(`select * from create_project('Esforço', 'https://tiktok.com/e1', 'inspired', 'claude-opus-5-5', 'high')`);
+assert.equal(ef1.effort, 'high'); assert.equal(ef1.model, 'claude-opus-5-5');
+assert.equal((await q(`select * from jobs where project_id=$1`, [ef1.id])).length, 1, 'a análise continua enfileirada');
+assert.equal((await q(`select * from create_project('Sem esforço', 'https://tiktok.com/e2')`))[0].effort, null, 'sem escolha vale o padrão do worker');
+await fails(`select create_project('x', 'https://tiktok.com/e3', 'inspired', null, 'turbo')`, [], /esforço inválido/);
+assert.equal((await q(`select * from create_story_project('H', 'Uma ideia', 60, 6, null, 'max')`))[0].effort, 'max');
+assert.equal((await q(`select * from create_factory_project('F', '{}'::jsonb, null, 'MEDIUM')`))[0].effort, 'medium');
+assert.equal((await q(`select * from create_project_from_plan('P', null, '{"production":[{"name":"C1","prompt":"x"}]}'::jsonb, null, 'low')`))[0].effort, 'low');
+await as(null, 'service_role');
+await db.query(`update projects set status='completed' where id=$1`, [ef1.id]);
+await as(A);
+assert.equal((await q(`select * from create_sequel($1)`, [ef1.id]))[0].effort, 'high', 'a continuação herda o esforço');
+assert.equal((await q(`select * from create_sequel($1, null, null, null, null, 'xhigh')`, [ef1.id]))[0].effort, 'xhigh');
+assert.equal((await q(`select * from set_project_effort($1, 'low')`, [ef1.id]))[0].effort, 'low');
+assert.equal((await q(`select * from set_project_effort($1, '')`, [ef1.id]))[0].effort, null);
+await fails(`select create_project_base('x', 'https://tiktok.com/e4', 'inspired', null)`, [], /permission denied/);
+await as(B);
+await fails(`select set_project_effort($1, 'max')`, [ef1.id], /not found|access denied/);
+step('esforço: escolhido na criação de cada tipo de projeto, herdado pela continuação, trocado depois; só o dono');
+
 console.log('Todas as verificações de SQL passaram.');

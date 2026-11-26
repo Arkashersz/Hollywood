@@ -169,12 +169,15 @@ def _evidence(folder: Path) -> list[Piece]:
         names = sorted(p.name for p in ref.glob("folha-*.jpg")) if ref.is_dir() else []
         data = {"sheets_hook": [n for n in names if n.startswith("folha-gancho")], "sheets_end": [n for n in names if n.startswith("folha-final")],
                 "sheets_1s": [n for n in names if n.startswith("folha-1s")], "sheets_cuts": [n for n in names if n.startswith("folha-cortes")]}
-    for field_name, key, label in groups:
-        names = [n for n in data.get(field_name) or [] if isinstance(n, str)]
-        for i, name in enumerate(names, 1):
-            path = ref / name
-            if path.is_file():
-                out.append(Piece(key.format(i=i), label.format(i=i, n=len(names)), path, "evidence"))
+    videos = data.get("videos")   # vários vídeos de referência: cada um na sua pasta ref-N, com chaves ev-vN-…
+    sets = [(ref / f"ref-{v}", f"ev-v{v}-", f"Vídeo {v} · ", entry) for v, entry in enumerate(videos, 1)] if videos else [(ref, "ev-", "", data)]
+    for folder_of, prefix, title, entry in sets:
+        for field_name, key, label in groups:
+            names = [n for n in entry.get(field_name) or [] if isinstance(n, str)]
+            for i, name in enumerate(names, 1):
+                path = folder_of / name
+                if path.is_file():
+                    out.append(Piece(key.replace("ev-", prefix, 1).format(i=i), title + label.format(i=i, n=len(names)), path, "evidence"))
     return out
 
 

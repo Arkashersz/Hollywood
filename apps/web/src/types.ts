@@ -2,7 +2,7 @@ import { Clapperboard, FileText, Film, Image, LayoutGrid, Link2, Mic, Sparkles, 
 
 export type StageStatus = 'locked' | 'queued' | 'in_progress' | 'pending_review' | 'approved' | 'changes_requested' | 'failed';
 
-export type Project = { id: string; title: string; source_url: string | null; mode?: 'inspired' | 'clone' | 'story' | 'factory'; profile?: FactoryProfile | null; story_idea?: string | null; target_seconds?: number | null; min_scenes?: number | null; model?: string | null; parent_id?: string | null; part?: number; sequel_notes?: string | null; status: string; current_stage: string; updated_at: string; created_at: string };
+export type Project = { id: string; title: string; source_url: string | null; mode?: 'inspired' | 'clone' | 'story' | 'factory'; profile?: FactoryProfile | null; story_idea?: string | null; target_seconds?: number | null; min_scenes?: number | null; model?: string | null; effort?: string | null; parent_id?: string | null; part?: number; sequel_notes?: string | null; status: string; current_stage: string; updated_at: string; created_at: string };
 
 export type FactoryProfile = { niche?: string; language?: string; style?: string; min_s?: number; max_s?: number; min_scenes?: number; references?: string[]; [key: string]: unknown };
 

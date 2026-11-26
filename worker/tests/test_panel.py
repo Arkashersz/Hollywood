@@ -271,7 +271,7 @@ def test_review_flow_sends_the_right_decisions(panel):
         ("decide_stage", {"p_stage_id": "stage-4", "p_decision": "request_changes", "p_comment": "Anna mais velha"}),
         ("decide_stage", {"p_stage_id": "stage-4", "p_decision": "approve"}),
         ("retry_stage", {"p_stage_id": "stage-5"}),
-        ("create_project", {"p_title": "Segundo", "p_source": "https://www.tiktok.com/@y/video/2", "p_mode": "clone", "p_model": None}),
+        ("create_project", {"p_title": "Segundo", "p_source": "https://www.tiktok.com/@y/video/2", "p_mode": "clone", "p_model": None, "p_effort": None}),
         ("delete_project", {"p_project_id": "11111111-aaaa-bbbb-cccc-000000000001"}),
     ]
 
@@ -354,6 +354,27 @@ def test_completed_project_offers_part_two_with_or_without_a_link(panel):
                               "p_title": None, "p_notes": "um dragão aparece"}) in calls
 
 
+def test_next_part_accepts_several_links_in_order(panel):
+    async def scenario(page, fake):
+        fake.project["status"] = "completed"
+        await page.reload()
+        await page.get_by_text("Anna und der Hund").first.click()
+        await page.get_by_role("button", name="Criar parte 2").click()
+        await page.get_by_label("Link da parte seguinte do original").fill("https://www.tiktok.com/@x/video/4")
+        await page.get_by_role("button", name="Adicionar outro vídeo").click()
+        await page.get_by_label("Link do vídeo 2").fill("https://www.tiktok.com/@x/video/descartado")
+        await page.get_by_role("button", name="Adicionar outro vídeo").click()
+        await page.get_by_label("Link do vídeo 3").fill("https://www.tiktok.com/@x/video/5")
+        await page.get_by_role("button", name="Remover o vídeo 2").click()
+        await page.get_by_text("Com 2 links:").wait_for()
+        await shot(page, "varios-links")
+        await page.get_by_role("button", name="Criar parte 2").last.click()
+        await page.get_by_text("analisa os 2 vídeos").wait_for()
+        return fake.rpc_calls
+    calls = drive(panel, scenario)
+    assert calls[0][0] == "create_sequel" and calls[0][1]["p_source"] == "https://www.tiktok.com/@x/video/4\nhttps://www.tiktok.com/@x/video/5"
+
+
 def test_factory_form_sends_the_production_profile_and_blocks_impossible_ones(panel):
     async def scenario(page, fake):
         await page.get_by_role("heading", name="Anna und der Hund").wait_for()
@@ -373,7 +394,7 @@ def test_factory_form_sends_the_production_profile_and_blocks_impossible_ones(pa
     calls = drive(panel, scenario)
     assert [c[0] for c in calls] == ["create_factory_project"]
     args = calls[0][1]
-    assert args["p_title"] == "Novela" and args["p_model"] is None
+    assert args["p_title"] == "Novela" and args["p_model"] is None and args["p_effort"] is None
     profile = args["p_profile"]
     assert profile["references"] == ["https://www.tiktok.com/@a/video/1", "C:/v/2.mp4"]
     assert (profile["language"], profile["style"], profile["min_s"], profile["max_s"], profile["min_scenes"], profile["scene_min_s"], profile["scene_max_s"], profile["audio"]) == \
@@ -478,3 +499,20 @@ def test_video_explains_why_it_cannot_play_when_the_pc_is_off_or_remote_access_i
         return await _video_state(page, seen)
     src, note = drive(panel, no_tunnel)
     assert src is None and "cloudflared" in note
+
+
+def test_model_and_effort_are_chosen_on_creation_and_changed_inside_the_project(panel):
+    async def scenario(page, fake):
+        await page.get_by_role("heading", name="Anna und der Hund").wait_for()
+        await page.get_by_label("Modelo do Claude", exact=True).select_option("claude-opus-5-5")
+        await page.get_by_label("Nível de esforço", exact=True).select_option("high")
+        await page.get_by_role("button", name="Criar na Fábrica").click()
+        await page.get_by_text("Projeto criado na Fábrica de roteiros.").wait_for()
+        await page.get_by_text("Anna und der Hund").first.click()
+        await page.get_by_label("Nível de esforço do projeto").select_option("max")
+        await page.get_by_text("Esforço do projeto: Máximo").wait_for()
+        await shot(page, "esforco")
+        return fake.rpc_calls
+    calls = drive(panel, scenario)
+    assert calls[0][0] == "create_factory_project" and calls[0][1]["p_model"] == "claude-opus-5-5" and calls[0][1]["p_effort"] == "high"
+    assert ("set_project_effort", {"p_project_id": "11111111-aaaa-bbbb-cccc-000000000001", "p_effort": "max"}) in calls

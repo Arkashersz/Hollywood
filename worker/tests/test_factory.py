@@ -58,7 +58,11 @@ def workflow_payload(script, split=None):
     for s in script["scenes"]:
         scenes.append({"id": f"{s['n']:02d}", "script_scene": s["n"], "title": s["title"], "environment": "Cozinha" if s["n"] < 7 else "Jardim", "characters": ["Banana", "Morango"],
                        "image_prompt_en": f"Medium shot, Banana holds a whisk, Morango stands beside the table, scene {s['n']}.", "animation_camera_en": f"Slow push-in; Banana lifts the whisk, scene {s['n']}.",
-                       "shot_pt": "plano médio, 35 mm, leve zoom", "dialogues": [dict(l) for l in s["lines"]], "duration_s": s["duration_s"], "note_pt": ""})
+                       "shot_pt": "plano médio, 35 mm, leve zoom", "duration_s": s["duration_s"], "note_pt": "",
+                       "dialogues": [{**l, "start_s": 0.5, "end_s": 3.5, "delivery": "excited"} for l in s["lines"]],
+                       "timeline": [{"start_s": t, "end_s": min(s["duration_s"], t + 2), "action": f"Banana lifts the whisk with her right hand, beat {t}; Morango watches, mouth closed."}
+                                    for t in range(0, s["duration_s"], 2)],
+                       "camera": "35mm, medium shot, slow push-in.", "keep": ["Banana holds the whisk in her right hand"], "ambient": "Kitchen sounds."})
     return {"scenes": scenes, "order_note_pt": "Em ordem."}
 
 
@@ -163,9 +167,9 @@ def test_full_factory_flow_from_proposals_to_9x16_clips(factory_project):
     assert scene["refs"] == ["folha-banana.png", "folha-morango.png", "ambiente-cozinha.png"]
     first = video.calls[0]
     assert first["start"] == "cena-01.png" and first["duration_s"] == 10 and len(video.calls) == 12
-    assert first["prompt"].startswith("Animation & Camera Action: Slow push-in")
-    assert 'Dialogue (speak in Brazilian Portuguese, each line exactly as written, in this order):\n- Banana (female): "Eu não acredito que isso aconteceu 1!"' in first["prompt"]
-    assert first["prompt"].endswith("Duration: 10 seconds. Vertical 9:16.") and "Banana has a warm mid voice." in first["prompt"]
+    assert first["prompt"].startswith("Image-to-video clip") and "SCENE: Slow push-in" in first["prompt"] and "ANIMATION LOCK" in first["prompt"]
+    assert 'spoken in Brazilian Portuguese' in first["prompt"] and '0.5–3.5 s · Banana (female): "Eu não acredito que isso aconteceu 1!"' in first["prompt"]
+    assert first["prompt"].startswith("Image-to-video clip, 10 seconds") and "8.0–10.0 s: everyone holds the final pose" in first["prompt"] and "Banana has a warm mid voice." in first["prompt"]
 
 
 def test_without_a_choice_the_recommended_proposal_is_developed(factory_project):
@@ -313,7 +317,7 @@ def test_worker_wires_profile_choice_and_clears_the_choice_when_proposals_are_re
         if stage not in db.stages:
             db.add_stage(stage)
         job = db.job("run_stage", stage, **inp)
-        asyncio.run(main.process(db, job, lambda project_dir, model=None: llm, llm, FakeVideo(sample_video)))
+        asyncio.run(main.process(db, job, lambda project_dir, model=None, effort=None: llm, llm, FakeVideo(sample_video)))
         return db.jobs[job["id"]]
 
     assert go("f_proposals")["status"] == "succeeded"
@@ -345,3 +349,17 @@ def test_speech_estimate_and_narrator_detection():
     assert factory.speech_seconds("") == 0
     assert 2.5 < factory.speech_seconds("uma duas três quatro cinco seis sete") < 2.7
     assert factory.is_narrator(" Narrador ") and not factory.is_narrator("Banana")
+
+
+def test_factory_clips_carry_the_locks_from_the_animation_workflow(factory_project):
+    ctx, llm, video, _ = factory_project
+    for key in ("f_refs", "f_proposals", "f_script", "f_bible", "f_workflow"):
+        run_factory(ctx, key)
+    clip = ctx.load_data("clips")["clips"][0]
+    assert clip["timeline"] and clip["lines"][0]["start_s"] == 0.5 and clip["camera"]
+    prompt = render.clip_prompt(ctx.load_data("bible"), clip)
+    assert "ANIMATION LOCK" in prompt and "VOICE LOCK" in prompt and "(female)" in prompt and "spoken in Brazilian Portuguese" in prompt
+    assert "Banana holds the whisk in her right hand" in prompt and "Morango" in prompt
+    workflow = next(a["prompt"] for a in llm.asks if "DIRETOR DE ANIMAÇÃO" in a["prompt"])
+    assert "TRAVAS DO VÍDEO" in workflow and '"dialogues"' in workflow
+    assert "Linha do tempo (animation lock)" in ctx.read_doc("F6")

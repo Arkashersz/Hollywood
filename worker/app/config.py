@@ -46,6 +46,7 @@ CHROME_PATH = os.getenv("CHROME_PATH", "")
 CDP_PORT = _int("CDP_PORT", 9333)
 CHATGPT_URL = os.getenv("CHATGPT_URL", "https://chatgpt.com/")
 GROK_URL = os.getenv("GROK_URL", "https://grok.com/imagine")
+GROK_LANDING_SECONDS = _int("GROK_LANDING_SECONDS", 20)   # quanto esperar, depois de enviar, a página ir para a postagem do vídeo novo
 SELECTORS_FILE = _path("SELECTORS_FILE", WORKER_DIR / "selectors.json")
 
 # Cérebro (análise, roteiro e prompts): Claude pelo Claude Code local. "chatgpt" usa o ChatGPT do navegador.

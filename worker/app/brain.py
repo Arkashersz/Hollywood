@@ -29,14 +29,19 @@ SYSTEM_PROMPT = (
 LIMIT_RE = re.compile(r"usage limit|rate limit|limit reached|hit your limit|limite|overloaded|quota", re.I)
 LOGIN_RE = re.compile(r"/login|not logged in|invalid api key|authentication|unauthorized|credentials", re.I)
 _STRIP_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDECODE")
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Esforço mais alto pensa por mais tempo: o limite de espera do CLAUDE_TIMEOUT cresce junto.
+TIMEOUT_FACTOR = {"low": 1.0, "medium": 1.5, "high": 2.0, "xhigh": 3.0, "max": 4.0}
 
 
 class ClaudeBrain:
     service = "Claude"
 
-    def __init__(self, cwd: Path, *, executable: str | None = None, runner=None, model: str | None = None):
+    def __init__(self, cwd: Path, *, executable: str | None = None, runner=None, model: str | None = None, effort: str | None = None):
         self.cwd = Path(cwd)
         self.model = (model or "").strip() or config.CLAUDE_MODEL   # o modelo do projeto vale mais que o padrão do PC
+        chosen = [e for e in ((effort or "").strip().lower(), (config.CLAUDE_EFFORT or "").strip().lower()) if e in EFFORTS]   # idem para o esforço
+        self.effort = chosen[0] if chosen else ""
         self.executable = executable or config.CLAUDE_PATH or shutil.which("claude") or ""
         self.session_id: str | None = None
         self._run = runner or _run_cli
@@ -56,12 +61,12 @@ class ClaudeBrain:
                    "--safe-mode", "--strict-mcp-config", "--system-prompt", SYSTEM_PROMPT]
         if self.model:
             command += ["--model", self.model]
-        if config.CLAUDE_EFFORT:
-            command += ["--effort", config.CLAUDE_EFFORT]
+        if self.effort:
+            command += ["--effort", self.effort]
         if not new_chat and self.session_id:
             command += ["--resume", self.session_id]
         self.cwd.mkdir(parents=True, exist_ok=True)
-        code, out, err = await self._run(command, prompt, self.cwd, timeout or config.CLAUDE_TIMEOUT)
+        code, out, err = await self._run(command, prompt, self.cwd, timeout or int(config.CLAUDE_TIMEOUT * TIMEOUT_FACTOR.get(self.effort, 1.0)))
         return self._parse(code, out, err)
 
     def _parse(self, code: int, out: str, err: str) -> str:

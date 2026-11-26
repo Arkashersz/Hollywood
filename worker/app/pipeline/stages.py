@@ -19,7 +19,7 @@ from .. import media
 from ..media import slugify
 from ..errors import Blocked
 from . import factory_stages, prompts, render
-from .core import Ctx, adopt_bible, adopt_plan, ask_json, strip_leading_title, validate_bible, validate_clips, validate_plan
+from .core import Ctx, adopt_bible, adopt_plan, ask_json, carry_changes, strip_leading_title, validate_bible, validate_clips, validate_plan
 
 ORDER = ["analysis", "script", "character_bible", "character_images", "character_sheets",
          "visual_plan", "scene_images", "video_prompts", "production"]
@@ -148,21 +148,65 @@ async def analysis(ctx: Ctx) -> dict:
         return await _story_analysis(ctx)
     if ctx.sequel and not ctx.sequel.get("has_ref"):
         return await _sequel_analysis(ctx)
-    ref = ctx.dir / "referencia"
-    evidence = await asyncio.to_thread(media.analyze, ctx.source, ref, whisper_model=ctx.whisper_model,
+    sources = media.split_sources(ctx.source)
+    if len(sources) > 1:
+        return await _merged_analysis(ctx, sources)
+    found = await _analyze_reference(ctx, ctx.source, ctx.dir / "referencia", ctx.previous("01"), ctx.previous("02"))
+    evidence, transcript = found["evidence"], found["evidence"].get("transcript")
+    ctx.write_doc("01", found["doc01"])
+    ctx.write_doc("02", found["doc02"])
+    p = evidence["probe"]
+    return {"summary": f"Referência de {p['duration']} s ({p['width']}x{p['height']}) analisada: {len(evidence['cut_candidates'])} candidatos a corte, "
+                       f"transcrição {'em ' + transcript['language'] if transcript else 'indisponível'}.", "warnings": found["warnings"]}
+
+
+async def _merged_analysis(ctx: Ctx, sources: list[str]) -> dict:
+    """Continuação inspirada em vários vídeos: analisa cada um por inteiro e depois planeja a história única que junta todos."""
+    total = len(sources)
+    prev_head, prev01 = prompts.split_by_video(ctx.previous("01"))
+    prev02 = prompts.split_by_video(ctx.previous("02"))[1]
+    found = []
+    for n, source in enumerate(sources, 1):
+        ctx.log(f"Analisando o vídeo {n} de {total}…")
+        try:
+            found.append(await _analyze_reference(ctx, source, ctx.dir / "referencia" / f"ref-{n}", prev01.get(n), prev02.get(n), video=(n, total)))
+        except Blocked as exc:
+            raise Blocked(exc.code, f"Vídeo {n} de {total}: {exc.message}", exc.action) from None
+    # Índice geral da referência: usado pelo kit de publicação e pela recuperação do projeto a partir da pasta.
+    index = {"source": "\n".join(sources), "metadata": found[0]["evidence"].get("metadata") or {}, "videos": [f["evidence"] for f in found]}
+    (ctx.dir / "referencia" / "evidencias.json").write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    ctx.log(f"Pedindo ao Claude o plano para unir os {total} vídeos em uma história só…")
+    plan = await ctx.brain.ask(prompts.merge_refs([(f["doc01"], f["doc02"]) for f in found], ctx.sequel, ctx.clone, prev_head or None, ctx.feedback), [])
+
+    def by_video(key: str) -> str:
+        return "\n\n".join(f"# Vídeo {n} de {total}\n\n{f[key]}" for n, f in enumerate(found, 1))
+
+    ctx.write_doc("01", strip_leading_title(plan).strip() + "\n\n" + by_video("doc01"))
+    ctx.write_doc("02", f"## Edição de cada referência\n\nA direção de edição do vídeo único está na seção U5 do Documento 01.\n\n{by_video('doc02')}")
+    seconds = round(sum(f["evidence"]["probe"]["duration"] for f in found), 1)
+    return {"summary": f"{total} vídeos de referência analisados ({seconds} s somados) e planejados como uma única história, em ordem. Leia o plano de união no começo do Documento 01.",
+            "warnings": [f"Vídeo {n}: {w}" for n, f in enumerate(found, 1) for w in f["warnings"]]}
+
+
+async def _analyze_reference(ctx: Ctx, source: str, ref: Path, prev01: str | None, prev02: str | None, video: tuple[int, int] | None = None) -> dict:
+    """Extrai as evidências de um vídeo e pede a ficha (01) e a análise de edição (02) dele."""
+    key = f"ev-v{video[0]}-" if video else "ev-"
+    label = f"Vídeo {video[0]} · " if video else ""
+    evidence = await asyncio.to_thread(media.analyze, source, ref, whisper_model=ctx.whisper_model,
                                        language=ctx.language, log=ctx.log)
     sheets = [ref / n for n in evidence["sheets_1s"]]
     cuts = [ref / n for n in evidence["sheets_cuts"]]
     hook = [ref / n for n in evidence.get("sheets_hook", [])]
     end = [ref / n for n in evidence.get("sheets_end", [])]
     for i, path in enumerate(hook, 1):
-        ctx.sink.file(ctx.stage_key, f"ev-folha-gancho-{i:02d}", "Gancho quadro a quadro (primeiros 4 s)", path, "evidence")
+        ctx.sink.file(ctx.stage_key, f"{key}folha-gancho-{i:02d}", f"{label}Gancho quadro a quadro (primeiros 4 s)", path, "evidence")
     for i, path in enumerate(end, 1):
-        ctx.sink.file(ctx.stage_key, f"ev-folha-final-{i:02d}", "Fecho / CTA quadro a quadro (últimos 4 s)", path, "evidence")
+        ctx.sink.file(ctx.stage_key, f"{key}folha-final-{i:02d}", f"{label}Fecho / CTA quadro a quadro (últimos 4 s)", path, "evidence")
     for i, path in enumerate(sheets, 1):
-        ctx.sink.file(ctx.stage_key, f"ev-folha-1s-{i:02d}", f"Quadros a cada 1 s ({i}/{len(sheets)})", path, "evidence")
+        ctx.sink.file(ctx.stage_key, f"{key}folha-1s-{i:02d}", f"{label}Quadros a cada 1 s ({i}/{len(sheets)})", path, "evidence")
     for i, path in enumerate(cuts, 1):
-        ctx.sink.file(ctx.stage_key, f"ev-folha-cortes-{i:02d}", f"Candidatos a corte ({i}/{len(cuts)})", path, "evidence")
+        ctx.sink.file(ctx.stage_key, f"{key}folha-cortes-{i:02d}", f"{label}Candidatos a corte ({i}/{len(cuts)})", path, "evidence")
 
     warnings = []
     everything = hook + sheets + end + cuts
@@ -178,15 +222,11 @@ async def analysis(ctx: Ctx) -> dict:
         warnings.append("Metadados do post (autor, legenda, data, métricas) não foram obtidos.")
 
     ctx.log("Pedindo a ficha da referência ao Claude…")
-    body01 = await ctx.brain.ask(prompts.doc01(evidence, ctx.previous("01"), ctx.feedback, ctx.clone), attachments)
-    prev02 = ctx.previous("02")
-    ctx.write_doc("01", render.identification(evidence) + "\n\n" + strip_leading_title(body01))
+    body01 = await ctx.brain.ask(prompts.doc01(evidence, prev01, ctx.feedback, ctx.clone, video), attachments)
     ctx.log("Pedindo a análise de edição ao Claude…")
     body02 = await ctx.brain.ask(prompts.doc02(prev02, ctx.feedback), [], new_chat=False)
-    ctx.write_doc("02", body02)
-    p = evidence["probe"]
-    return {"summary": f"Referência de {p['duration']} s ({p['width']}x{p['height']}) analisada: {len(evidence['cut_candidates'])} candidatos a corte, "
-                       f"transcrição {'em ' + transcript['language'] if transcript else 'indisponível'}.", "warnings": warnings}
+    return {"evidence": evidence, "warnings": warnings, "doc01": render.identification(evidence) + "\n\n" + strip_leading_title(body01),
+            "doc02": strip_leading_title(body02).strip()}
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +259,8 @@ async def character_bible(ctx: Ctx) -> dict:
     reused = adopt_bible(bible, ctx.sequel)
     if reused:
         ctx.log(f"Já existem e voltam idênticos (sem gerar de novo): {', '.join(reused)}.")
+    if ctx.data_path("bible").is_file():   # refazer o texto não apaga o que o usuário já ajustou nas imagens
+        carry_changes(bible, ctx.load_data("bible"), "characters")
     ctx.save_data("bible", bible)
     ctx.write_doc("04", render.doc04(bible, ctx.direct_sheets))
     ctx.write_doc("05", render.doc05(bible, ctx.direct_sheets))
@@ -244,13 +286,14 @@ async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note
         unknown = [k for k in targets if k not in {i.key for i in items}]
         if unknown:
             raise Blocked("MISSING_INPUT", f"Item desconhecido nesta etapa: {', '.join(unknown)}")
+    _prune_gone(ctx, items)
     kept = made = 0
     todo: list[Item] = []
     for item in items:
         if targets is not None and item.key not in targets:
             continue
         recorded = ctx.generated_version(item.key)
-        if targets is None and item.key not in ctx.force and item.path.is_file() and (recorded is None or recorded >= ctx.version):
+        if targets is None and item.key not in ctx.force and item.path.is_file() and not ctx.is_stale(item.key) and (recorded is None or recorded >= ctx.version):
             ctx.sink.file(ctx.stage_key, item.key, item.name, item.path, item.kind, _meta(item))
             kept += 1
             continue
@@ -277,19 +320,30 @@ async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note
                 await ctx.pause()
             state["last_start"] = loop.time()
             ctx.sink.progress(ctx.stage_key, finished, total, f"Gerando {item.name}…")
-            item_note = targets.get(item.key) if targets is not None else note
-            prompt = item.prompt + (f"\n\nRequested adjustment (from the user): {item_note}" if item_note else "")
+            item_note = (targets.get(item.key) if targets is not None else note) or None
+            # Ajuste = editar a imagem que está aprovada hoje (ela vai como 1ª referência) e manter todos os ajustes anteriores.
+            # Item desatualizado (a imagem da qual ele depende mudou) é refeito a partir das referências novas.
+            base = item.path if (item_note and item.kind == "image" and item.path.is_file() and not ctx.is_stale(item.key)) else None
+            prompt = adjusted_prompt(item.prompt, ctx.adjustments(item.key), item_note, base is not None)
             refs = item.refs()
+            if base is not None:
+                refs = [base, *[r for r in refs if Path(r) != base]]
+            if item.kind == "image" and item.path.is_file():
+                _keep_previous(ctx, item.path)   # a versão de hoje nunca se perde, mesmo que a nova saia pior
             if item.kind == "video":
                 info = await ctx.video.generate_video(prompt, refs, item.path, duration_s=item.duration, slot=slot)
             else:
                 info = await ctx.images.generate_image(prompt, refs, item.path, slot=slot)
             ctx.mark_generated(item.key)
+            if item_note:
+                ctx.add_adjustment(item.key, item_note)
+                _remember_look(ctx, item, item_note)
             await asyncio.to_thread(ctx.sink.file, ctx.stage_key, item.key, item.name, item.path, item.kind, {**_meta(item), **(info or {})})
             ctx.log(f"Gerado: {item.name}.")
             made += 1
             finished += 1
         except Exception as exc:  # noqa: BLE001 - guarda o primeiro erro; os itens já em andamento terminam sozinhos
+            exc = _explain_browser_error(exc)
             if state["error"] is None:
                 exc.item = {"key": item.key, "name": item.name, "prompt": item.prompt[:6000], "kind": item.kind}
                 state["error"] = exc
@@ -307,6 +361,114 @@ async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note
     return {"made": made, "kept": kept}
 
 
+def adjusted_prompt(prompt: str, earlier: list[str], new: str | None, with_base: bool) -> str:
+    """Prompt do item com os ajustes já aprovados e o novo. Com `with_base`, a 1ª imagem anexada é a versão atual e só o novo ajuste muda."""
+    earlier = [n for n in earlier if n != new]
+    out = prompt
+    if with_base:
+        out += ("\n\nEDIT MODE: the FIRST attached image is the CURRENT approved version of this image. Keep it EXACTLY as it is "
+                "(same character(s), face, hair, outfit, colors, accessories, composition, framing, lighting and style) and change ONLY what the "
+                "latest adjustment below asks for. Any other attached image is only a reference.")
+    if earlier:
+        out += ("\n\nAdjustments the user already approved (they are part of the current look; never undo them):\n"
+                + "\n".join(f"{n}. {note}" for n, note in enumerate(earlier, 1)))
+    if new:
+        out += f"\n\nRequested adjustment (from the user): {new}"
+    return out
+
+
+def _explain_browser_error(exc: Exception) -> Exception:
+    """Aba ou janela do Chrome fechada no meio da geração: vira uma parada com explicação, não um erro técnico."""
+    if type(exc).__name__ == "TargetClosedError" or "has been closed" in str(exc):
+        return Blocked("TAB_CLOSED", "A aba ou a janela do Chrome do worker foi fechada enquanto este item era gerado.")
+    return exc
+
+
+def _prune_gone(ctx: Ctx, items: list[Item]) -> None:
+    """Tira do painel as imagens/vídeos que ficaram de um plano anterior (ex.: ambiente que o plano refeito não tem mais),
+    para não sobrar item que parece ajustável mas já não existe nesta etapa."""
+    prune = getattr(ctx.sink, "prune", None)
+    if prune is None:
+        return
+    try:
+        gone = prune(ctx.stage_key, {i.key for i in items})
+    except Exception as exc:  # noqa: BLE001 - limpeza do painel nunca derruba a geração
+        ctx.log(f"Não consegui limpar itens antigos do painel: {exc}", "warn")
+        return
+    if gone:
+        ctx.log(f"Removidos do painel {len(gone)} item(ns) que não fazem mais parte desta etapa: {', '.join(gone)}.")
+
+
+def _keep_previous(ctx: Ctx, path: Path) -> None:
+    """Guarda a versão atual da imagem em imagens/_anteriores/ antes de ela ser substituída."""
+    try:
+        folder = ctx.dir / "imagens" / "_anteriores"
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = int(path.stat().st_mtime)
+        target = folder / f"{path.stem}-{stamp}{path.suffix}"
+        if not target.exists():
+            shutil.copyfile(path, target)
+    except OSError:
+        pass
+
+
+def _remember_look(ctx: Ctx, item: Item, note: str) -> None:
+    """Um ajuste na imagem de um personagem ou de um ambiente vira parte da descrição dele, para os prompts de cena e de vídeo
+    (que repetem essa descrição) não voltarem à aparência anterior."""
+    key = item.key
+    source, slug = None, ""
+    if key.startswith("img-personagem-") and key.endswith("-corpo"):
+        source, slug = "bible", key[len("img-personagem-"):-len("-corpo")]
+    elif key.startswith("img-folha-"):
+        source, slug = "bible", key[len("img-folha-"):]
+    elif key.startswith("img-ambiente-"):
+        source, slug = "plan", key[len("img-ambiente-"):]
+    if source is None or not ctx.data_path(source).is_file():
+        return
+    data = ctx.load_data(source)
+    entries = data.get("characters" if source == "bible" else "environments") or []
+    entry = next((e for e in entries if e.get("slug") == slug), None)
+    if entry is None:
+        return
+    changes = [c for c in entry.get("approved_changes") or [] if c != note] + [note]
+    entry["approved_changes"] = changes[-ctx.MAX_ADJUSTMENTS:]
+    ctx.save_data(source, data)
+
+
+def _stale_dependents(ctx: Ctx, changed: list[Item]) -> list[Item]:
+    """Itens JÁ GERADOS (de qualquer etapa) que usam, direta ou indiretamente, uma das imagens que acabou de mudar.
+    Eles foram feitos com a versão anterior: ficam marcados como desatualizados e são refeitos a partir da nova."""
+    everything: list[Item] = []
+    for stage_key in ITEM_BUILDERS:
+        try:
+            everything += items_for(ctx, stage_key)
+        except Exception:  # noqa: BLE001 - etapa ainda sem dados (não rodou): não há nada gerado nela
+            continue
+    refs_of: dict[str, set[Path]] = {}
+    for it in everything:
+        try:
+            refs_of[it.key] = {Path(r).resolve() for r in it.refs()}
+        except Exception:  # noqa: BLE001 - referência ainda inexistente
+            refs_of[it.key] = set()
+    changed_keys = {i.key for i in changed}
+    reached = {i.path.resolve() for i in changed}
+    stale: list[Item] = []
+    grew = True
+    while grew:
+        grew = False
+        for it in everything:
+            if it.key in changed_keys or it.path.resolve() in reached:
+                continue
+            if refs_of[it.key] & reached:
+                reached.add(it.path.resolve())
+                grew = True
+                if it.path.is_file():
+                    stale.append(it)
+    for it in stale:
+        ctx.mark_stale(it.key, ", ".join(i.name for i in changed))
+    return stale
+
+
 def _meta(item: Item) -> dict:
     meta = {"prompt": item.prompt}
     if item.kind == "video":
@@ -317,6 +479,7 @@ def _meta(item: Item) -> dict:
     return meta
 
 
+STALE_PREFIX = "Desatualizado: "
 REUSED = " (da parte anterior)"
 
 
@@ -440,6 +603,8 @@ async def visual_plan(ctx: Ctx) -> dict:
     ctx.log("Pedindo ambientes e imagens-base ao Claude…")
     plan = await ask_json(ctx.brain, prompt, lambda raw: validate_plan(raw, bible, int(ctx.story["min_scenes"]) if ctx.story else 0))
     reused = adopt_plan(plan, ctx.sequel)
+    if ctx.data_path("plan").is_file():
+        carry_changes(plan, ctx.load_data("plan"), "environments")
     ctx.save_data("plan", plan)
     ctx.write_doc("07", render.doc07(bible, plan))
     count = len([e for e in plan["environments"] if not e.get("reused")]) + len(plan["scenes"])
@@ -529,6 +694,25 @@ async def regen_items(ctx: Ctx, targets: dict[str, str | None]) -> dict:
     """Refaz só os itens indicados, cada um com a sua observação."""
     if ctx.stage_key not in ITEM_BUILDERS:
         raise Blocked("MISSING_INPUT", "Esta etapa não tem itens regeneráveis.")
-    await generate(ctx, items_for(ctx, ctx.stage_key), targets=targets)
+    items = items_for(ctx, ctx.stage_key)
+    valid = {i.key for i in items}
+    skipped = [k for k in targets if k not in valid]
+    if skipped and len(skipped) == len(targets):
+        skipped = []   # nada válido: o generate() explica o erro
+    else:   # itens de um plano anterior não derrubam o pedido dos que ainda existem
+        targets = {k: v for k, v in targets.items() if k in valid}
+    await generate(ctx, items, targets=targets)
     names = ", ".join(targets)
-    return {"summary": f"Item regenerado: {names}." if len(targets) == 1 else f"{len(targets)} itens regenerados: {names}."}
+    result = {"summary": f"Item regenerado: {names}." if len(targets) == 1 else f"{len(targets)} itens regenerados: {names}."}
+    if skipped:
+        note = f"Ignorados {len(skipped)} item(ns) que não existem mais nesta etapa (de um plano anterior): {', '.join(skipped)}."
+        ctx.log(note, "warn")
+        result["warnings"] = [note]
+    stale = _stale_dependents(ctx, [i for i in items if i.key in targets])
+    if stale:
+        listed = ", ".join(i.name for i in stale[:12]) + (f" e mais {len(stale) - 12}" if len(stale) > 12 else "")
+        warning = (f"{STALE_PREFIX}{len(stale)} item(ns) de etapas seguintes foram feitos com a versão anterior desta imagem: {listed}. "
+                   "Eles serão refeitos com a nova versão ao rodar a etapa deles (ou use Ajustar neles).")
+        ctx.log(warning, "warn")
+        result["warnings"] = [*result.get("warnings", []), warning]
+    return result

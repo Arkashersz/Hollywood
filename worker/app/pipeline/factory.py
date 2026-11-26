@@ -14,7 +14,7 @@ from .. import config
 from ..errors import Blocked
 from ..media import slugify
 from . import prompts
-from .core import _strings, _text, _unique_slug
+from .core import _strings, _text, _unique_slug, validate_dialogue, validate_timeline
 from .render import NA, _bullets, _cell, _code
 
 ASPECT = "9:16"
@@ -359,16 +359,21 @@ Regras desta entrega:
 - "duration_s" (inteiro, no máximo {MAX_CLIP_S}) vem da duração real da fala no idioma do perfil (cerca de {WORDS_PER_SECOND:.1f} palavras por segundo) mais o tempo da ação. A fala precisa caber na duração.
 - As falas do roteiro são copiadas EXATAMENTE (mesmo texto), cada uma com o nome do personagem; não reescreva, não omita e não acrescente falas.
 - "image_prompt_en": em INGLÊS, ultra detalhado, SÓ o segundo zero (pre-action): cenário limpo, personagens (nomes iguais aos da lista) na pose de preparação, com os objetos já nas mãos, roupas e acessórios conforme a matriz de continuidade daquela cena. Nada de movimento, efeito, partícula ou transformação. Não cole a descrição fixa inteira (o worker cola a descrição fixa e o bloco de estilo); descreva composição, pose, olhar, objetos e estado do cenário.
-- "animation_camera_en": em INGLÊS, tudo o que acontece durante o clipe, em ordem (movimento, expressões, objetos, efeitos, som ambiente) mais a câmera com lente, distância, ângulo e movimento explícitos. Sem descrever a aparência dos personagens.
+- "animation_camera_en": em INGLÊS, 1 ou 2 frases com o resumo do que acontece no clipe; o detalhe segundo a segundo vai em "timeline". Sem descrever a aparência dos personagens.
+- A "timeline" e as falas usam a duração planejada da cena ("duration_s"): a timeline termina exatamente nela.
 - "characters": só quem está visível no quadro do segundo zero (nomes exatos, sem o narrador).
 {anatomy_rules(profile) if profile['fruit'] else ''}
+
+{prompts.lock_rules(WORDS_PER_SECOND, "dialogues")}
 
 Devolva este objeto:
 {{
  "scenes": [
   {{"id": "1", "script_scene": 1, "title": "nome curto da cena", "environment": "nome de um ambiente da lista", "characters": ["..."],
     "image_prompt_en": "...", "animation_camera_en": "...", "shot_pt": "lente, distância, ângulo e movimento em português",
-    "dialogues": [{{"speaker": "nome", "text": "fala exata"}}], "duration_s": 8, "note_pt": "por que dividiu a cena, ajustes de tempo ou o que conferir"}}
+    "timeline": [{{"start_s": 0.0, "end_s": 0.6, "action": "..."}}, {{"start_s": 0.6, "end_s": 2.5, "action": "..."}}],
+    "camera": "...", "keep": ["..."], "ambient": "...",
+    "dialogues": [{{"speaker": "nome", "text": "fala exata", "start_s": 0.6, "end_s": 2.5, "delivery": "..."}}], "duration_s": 8, "note_pt": "por que dividiu a cena, ajustes de tempo ou o que conferir"}}
  ],
  "order_note_pt": "ordem de geração recomendada e observações gerais"
 }}
@@ -587,18 +592,16 @@ def validate_workflow(raw: dict, profile: dict, script_data: dict, factory_data:
                 raise ValueError(f'{where}: personagem "{name}" não existe (use {[c["name"] for c in factory_data["characters"]]})')
             if not c["voice_only"] and c["name"] not in cast:
                 cast.append(c["name"])
-        dialogues = []
-        for line in _lines({"lines": s.get("dialogues")}, where):
-            speaker = chars.get(line["speaker"].casefold())
-            if speaker is None:
-                raise ValueError(f'{where}: quem fala ("{line["speaker"]}") não é um personagem conhecido')
-            dialogues.append({"speaker": speaker["name"], "text": line["text"]})
+        names = {c["name"].casefold(): c["name"] for c in factory_data["characters"]}
+        dialogues = validate_dialogue(s.get("dialogues"), names, duration, where, WORDS_PER_SECOND)
+        timeline = validate_timeline(s.get("timeline"), duration, where)
         spoken = lines_seconds(dialogues)
         if spoken > duration + SPEECH_SLACK:
             raise ValueError(f'{where}: a fala leva cerca de {spoken:.1f} s e o clipe tem {duration} s. Divida a cena em dois clipes ("{sid}a" e "{sid}b") ou alongue (até {MAX_CLIP_S} s)')
         out.append({"id": sid, "script_scene": script_scene, "title": _text(s, "title", where), "environment": env["name"], "characters": cast,
                     "image_prompt_en": _text(s, "image_prompt_en", where), "animation_camera_en": _text(s, "animation_camera_en", where),
                     "shot_pt": _text(s, "shot_pt", where, required=False), "dialogues": dialogues, "duration_s": duration, "speech_s": round(spoken, 1),
+                    "timeline": timeline, "camera": _text(s, "camera", where), "keep": _strings(s, "keep"), "ambient": _text(s, "ambient", where, required=False),
                     "note_pt": _text(s, "note_pt", where, required=False)})
     covered = {s["script_scene"] for s in out}
     absent = sorted(set(valid_scenes) - covered)
@@ -626,7 +629,8 @@ def plan_and_clips(profile: dict, factory_data: dict, wf: dict, snap) -> tuple[d
                        "explanation_pt": s["title"], "pre_action": True})
         clips.append({"n": n, "scene": s["id"], "cast": s["characters"], "duration_s": snap(s["duration_s"], MAX_CLIP_S), "start": "scene_image",
                       "reference_images": [f"cena-{s['id']}"], "prompt": s["animation_camera_en"], "speakers": list(dict.fromkeys(d["speaker"] for d in s["dialogues"])),
-                      "lines": [{"speaker": d["speaker"], "gender_en": GENDER_EN.get(chars[d["speaker"]]["gender_pt"], ""), "text": d["text"]} for d in s["dialogues"]],
+                      "lines": [{**d, "gender_en": GENDER_EN.get(chars[d["speaker"]]["gender_pt"], "")} for d in s["dialogues"]],
+                      "timeline": s.get("timeline") or [], "camera": s.get("camera") or "", "keep": s.get("keep") or [], "ambient": s.get("ambient") or "", "planned_s": s["duration_s"],
                       "language_en": profile["language_en"], "dialogue_de": "", "dialogue_pt": " / ".join(d["text"] for d in s["dialogues"]),
                       "continuity_pt": s["note_pt"], "check_pt": ["rosto e roupa iguais à folha do personagem", "fala exatamente como no roteiro", "sem ação já iniciada no primeiro quadro"]})
     plan = {"areas": areas, "environments": envs, "scenes": scenes}
@@ -760,16 +764,21 @@ def doc_workflow(profile: dict, plan: dict, clips: dict, wf: dict, bible_data: d
     plan_scenes = {s["id"]: s for s in plan["scenes"]}
     for s in wf["scenes"]:
         c = next(x for x in clips["clips"] if x["scene"] == s["id"])
-        dialogue = "\n".join(f"  * **{d['speaker']} ({chars[d['speaker']]['gender_pt']}):** “{d['text']}”" for d in s["dialogues"]) or "  * (sem fala)"
+        dialogue = "\n".join(f"  * {_when(d)}**{d['speaker']} ({chars[d['speaker']]['gender_pt']}):** “{d['text']}”" for d in s["dialogues"]) or "  * (sem fala)"
+        beats = "\n".join(f"  * {b['start_s']:.1f}–{b['end_s']:.1f} s: {b['action']}" for b in s.get("timeline") or [])
         parts += [f"#### CENA {s['id']} - {s['title']}",
                   f"* **Imagem — ({ASPECT}):**\n\n{_code(scene_prompt(plan_scenes[s['id']]))}",
-                  f"* **Animation & Camera Action:** {s['animation_camera_en']}",
+                  f"* **Animation & Camera Action:** {s['animation_camera_en']}" + (f"\n* **Linha do tempo (animation lock):**\n{beats}\n* **Câmera:** {s.get('camera')}" if beats else ""),
                   f"* **Áudio e Diálogos:**\n{dialogue}",
                   f"* **Duração:** {s['duration_s']} s planejados · clipe de {c['duration_s']} s (limite de {MAX_CLIP_S} s)" + (f"\n* **Nota:** {s['note_pt']}" if s["note_pt"] else ""),
                   f"* **Prompt completo do clipe (enviado ao Grok):**\n\n{_code(clip_prompt(c))}"]
     parts += ["## Checklist antes de gerar", checklist_workflow(wf, clips),
               f"## O que você decide\nAo aprovar, o worker gera no ChatGPT as folhas {ASPECT} dos personagens, os ambientes e a imagem de segundo zero de cada cena; depois o clipe-piloto no Grok e, aprovado o piloto, os demais."]
     return "\n\n".join(parts)
+
+
+def _when(line: dict) -> str:
+    return f"{line['start_s']:.1f}–{line['end_s']:.1f} s · " if "start_s" in line else ""
 
 
 def checklist_workflow(wf: dict, clips: dict) -> str:
@@ -782,5 +791,8 @@ def checklist_workflow(wf: dict, clips: dict) -> str:
         ("A ação e a câmera ficam dentro da Animation & Camera Action, não na imagem", True),
         ("O diálogo está separado pelo nome e pelo gênero do personagem", all(not s["dialogues"] or all(d["speaker"] for d in s["dialogues"]) for s in scenes)),
         ("Todas as falas do roteiro foram preservadas (conferido pelo worker)", True),
+        ("Linha do tempo de 0 s até o fim do clipe, sem buracos, em trechos de no máximo 3 s (conferido pelo worker)", all(s.get("timeline") for s in scenes)),
+        ("Cada fala tem início e fim, uma pessoa por vez; quem não fala fica de boca fechada (travado no prompt)", True),
+        ("Voz, visual e continuidade de cada personagem travados no prompt do clipe", True),
     ]
     return "\n".join(f"- [{'x' if ok else ' '}] {text}" for text, ok in checks) + "\n- [ ] Confira por você: algum elemento que a IA possa interpretar errado e precise ser travado? Se sim, peça ajustes nesta etapa."

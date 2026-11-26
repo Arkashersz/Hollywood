@@ -25,6 +25,7 @@ ACTIONS = {
     "LIMIT_REACHED": "O serviço informou limite de uso. Aguarde a renovação da cota e clique em Tentar novamente; os itens já gerados são mantidos.",
     "REFUSED": "O serviço recusou o pedido. Use Pedir ajustes para alterar o texto/prompt e gerar de novo.",
     "UI_CHANGED": "A interface do serviço não respondeu como esperado. Rode `python -m app.cli check` e ajuste worker/selectors.json; como alternativa, gere o item manualmente e salve o arquivo no caminho indicado.",
+    "TAB_CLOSED": "A aba ou a janela do Chrome do worker foi fechada no meio da geração. Não feche o Chrome do worker enquanto ele trabalha; clique em Tentar novamente (os itens já gerados são mantidos).",
     "TIMEOUT": "A geração ficou sem progresso. Verifique a janela do Chrome do worker e clique em Tentar novamente.",
     "DOWNLOAD_FAILED": "Não foi possível baixar o arquivo original. Baixe manualmente, salve no caminho indicado e clique em Tentar novamente.",
     "SOURCE_UNAVAILABLE": "Não foi possível baixar o vídeo. Salve o .mp4 no PC do worker e crie o projeto informando o caminho do arquivo.",

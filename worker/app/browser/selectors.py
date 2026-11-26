@@ -24,7 +24,7 @@ DEFAULTS: dict[str, dict[str, str]] = {
     },
     "grok": {
         "composer": "textarea, div[contenteditable='true']",
-        "send": "button[type='submit'], button[aria-label*='Submit' i], button[aria-label*='Send' i], button[aria-label*='Enviar' i]",
+        "send": "form button[type='submit'], button[aria-label='Submit' i], button[aria-label='Submeter' i], button[aria-label='Send' i], button[aria-label='Enviar' i]",   # rótulos EXATOS: com *='Send' casava com o vídeo \"Malik sendo empurrado\" do histórico",
         # Só o campo de anexo da caixa de criação: a página tem outros (cartões "Editar texto", "Edição Precisa"…) que NÃO servem.
         "file_input": "form input[type='file']",
         # Miniatura que aparece na caixa de criação depois de anexar a imagem inicial.

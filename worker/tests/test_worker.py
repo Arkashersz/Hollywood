@@ -69,7 +69,7 @@ def world(tmp_path, sample_video, monkeypatch):
         if stage not in db.stages:
             db.add_stage(stage)
         job = db.job(kind, stage, **inp)
-        asyncio.run(main.process(db, job, lambda project_dir, model=None: llm, llm, video))
+        asyncio.run(main.process(db, job, lambda project_dir, model=None, effort=None: llm, llm, video))
         return db.jobs[job["id"]]
     return db, llm, video, run
 

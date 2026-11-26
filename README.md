@@ -67,6 +67,12 @@ Os arquivos originais ficam em `runtime/projects/<id do projeto>/` (documentos `
 
 O Claude só escreve o prompt e a duração de cada clipe. Quem opera o Grok é o Python: escolhe **720p** (sempre), a duração (**6, 10 ou 15 s**, a menor que comporta o clipe), a proporção vertical 9:16, confere na tela que as opções ficaram aplicadas antes de enviar e só baixa o vídeo **novo** que nasceu desse envio, com a duração e a resolução pedidas (vídeos antigos da página ou fora do pedido são ignorados; se nenhum servir, a etapa para e explica). Ajustes em `worker/.env`: `GROK_RESOLUTION`, `GROK_ASPECT` (vazio = não mexer), `GROK_MAX_CLIP_SECONDS`. Nos prompts importados, use `Duração: 10` no bloco do clipe; sem isso vale o que o prompt cita ("10 seconds") ou 6 s.
 
+## Como os ajustes funcionam
+
+- **Ajustar = editar a imagem de hoje.** A imagem atual vai como 1ª referência e o prompt manda mudar só o que você pediu. Os ajustes **acumulam** (`dados/ajustes.json`): o próximo parte do anterior, e até "gerar de novo" sem observação mantém tudo que você já aprovou. A versão substituída fica em `imagens/_anteriores/`.
+- **O ajuste vira parte do personagem/ambiente.** Ao ajustar o corpo inteiro, a folha ou um ambiente, o pedido entra na descrição dele (`approved_changes` em `dados/bible.json` / `plan.json`), que é colada em todos os prompts de cena e de vídeo. Refazer o texto do personagem não apaga isso.
+- **Etapas seguintes não ficam com a versão antiga.** Ao ajustar uma imagem, tudo o que já foi gerado a partir dela (folha, cenas, clipes) é marcado como *desatualizado* (aviso na etapa e `dados/desatualizados.json`) e é refeito, a partir da nova imagem, quando a etapa dele rodar ou quando você usar Ajustar nele.
+
 ## Vários projetos e geração simultânea
 
 **Vários projetos ao mesmo tempo:** o worker conduz até `MAX_PARALLEL_JOBS=3` projetos (links) em paralelo; do quarto em diante, esperam na fila. Nunca há duas tarefas do mesmo projeto ao mesmo tempo, e as abas do ChatGPT e do Grok são divididas entre os projetos (as imagens de um projeto não esperam o fim do outro por inteiro, só pela vez nas abas). Cada projeto continua parando para a sua aprovação em cada etapa. Com `BRAIN=chatgpt` o worker volta a um projeto por vez.
@@ -90,6 +96,7 @@ Quando um projeto fica **Concluído**, aparece o botão **Criar parte 2** (depoi
 
 - **Sem link**: o Claude resume a história até aqui, lista os fios soltos e propõe três direções para a continuação (a primeira etapa mostra isso; escolha uma pedindo revisão, ou aprove para seguir a recomendada). A edição herda o estilo da parte anterior.
 - **Com o link da parte 2 do vídeo original**: o Claude analisa esse vídeo e escreve a continuação da *sua* história seguindo o que acontece nele (estrutura, acontecimentos, ritmo e gancho), sem copiar falas. Se o projeto anterior era "Cópia fiel", a continuação também é fiel ao novo vídeo.
+- **Com vários links** (botão **Adicionar outro vídeo**, até 5, na ordem da história): para juntar, por exemplo, os episódios 4 e 5 do original numa parte só. O Claude analisa cada vídeo, escreve um plano de união (no começo do Documento 01) e um único roteiro que percorre todos em sequência, sem recapitulação nem chamada para ação no meio. O vídeo pode passar dos 75–95 s habituais para caber tudo, até a soma dos originais. Não exige migração; reinicie o worker depois de atualizar.
 - Um campo opcional de **ideias** (o que você quer que aconteça) tem prioridade sobre as sugestões do Claude.
 - **Personagens e ambientes não são recriados.** Cada continuação recebe a biblioteca da série (todas as partes anteriores). Personagem ou ambiente que já existe, pelo mesmo nome, volta com descrição, acessórios, voz e estilo idênticos e a imagem é copiada, sem passar pelo ChatGPT (aparece como "da parte anterior"). Só o que é novo é gerado. Os arquivos seguem sempre o mesmo padrão: `personagem-<nome>-corpo.png`, `folha-<nome>.png` e `ambiente-<nome>.png`.
 
@@ -144,6 +151,21 @@ Cada projeto fica em `runtime/projects/<nome do projeto>` (o nome que você deu;
 ## Modelo do Claude por projeto
 
 Ao criar o projeto você escolhe o modelo do Claude (roteiro, personagens, prompts); "Padrão do PC do worker" usa o `CLAUDE_MODEL` do `worker/.env`. Dá para trocar no próprio projeto (vale a partir da próxima tarefa) e a parte 2 herda o modelo da parte anterior. Imagens e vídeos continuam no ChatGPT e no Grok. Exige a migração `0014_project_model.sql`.
+
+Ao lado do modelo fica o **nível de esforço** (Baixo, Médio, Alto, Extra alto, Máximo), o mesmo do chat do Claude: ex.: Opus 5.5 no Alto para uma história importante, Sonnet 5.5 no Médio para uma simples. Vale para todas as etapas de texto do projeto; "Esforço padrão do PC" usa o `CLAUDE_EFFORT` do `worker/.env`. Esforço mais alto demora mais e gasta mais cota (o worker espera proporcionalmente mais antes de desistir). Dá para trocar dentro do projeto, e a continuação herda o da parte anterior. Exige a migração `0020_project_effort.sql`.
+
+## Travas dos prompts de vídeo
+
+Todo clipe planejado a partir de agora (link, cópia fiel, ideia, continuação e Fábrica) vai ao Grok com travas, e o worker confere o formato antes de aceitar o que o Claude escreveu:
+
+- **Animation lock**: a animação em linha do tempo (ex.: 0.0–0.6 s, 0.6–2.4 s…), sem buracos, em trechos de no máximo 3 s, dizendo o que cada personagem visível faz com o corpo, os pés, qual mão, o olhar, a expressão e a boca. Se o Grok gera mais tempo do que a cena precisa, o restante fica parado (é cortado na edição).
+- **Camera lock**: lente, distância, ângulo e movimento com início e fim.
+- **Dialogue lock**: cada fala com quem fala, o horário e o jeito de falar; uma pessoa por vez. Quem não está falando fica de boca fechada; clipe sem fala não tem ninguém falando.
+- **Voice lock**: a voz aprovada de cada personagem que fala, igual em todos os clipes, sem trocar entre personagens.
+- **Design lock**: a descrição fixa de cada personagem (com os ajustes aprovados nas imagens), sem mudar roupa, cor ou acessório.
+- **Continuity lock**: objetos (quem segura e em qual mão), posições, portas e luzes que não mudam; nada aparece ou some sem a ação mostrar.
+
+Projetos que já passaram da etapa de prompts de vídeo mantêm os prompts antigos; para ganhar as travas, volte à etapa "Prompts de vídeo" e peça para refazer.
 
 ## Criar a partir de uma ideia de história
 

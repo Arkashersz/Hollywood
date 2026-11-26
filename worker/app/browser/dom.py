@@ -125,3 +125,21 @@ async (url) => {
   });
 }
 """
+
+
+# O botão de enviar do Grok: habilitado no DOM um instante antes de ficar pronto (fica cinza-claro e depois azul).
+SEND_READY = r"""
+(selector) => {
+  const buttons = [...document.querySelectorAll(selector)].filter((b) => b.getClientRects().length && !b.disabled);
+  if (!buttons.length) return false;
+  const button = buttons[0];
+  const target = button.firstElementChild;
+  if (!target) return true;   // botão simples (sem o círculo colorido): não dá para julgar pela cor
+  const color = getComputedStyle(target).backgroundColor;
+  const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+  const ctx = canvas.getContext('2d'); ctx.fillStyle = '#ffffff'; ctx.fillStyle = color; ctx.fillRect(0, 0, 1, 1);
+  const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+  if (a < 200) return true;   // sem fundo próprio: não dá para julgar pela cor
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) < 200;   // cinza-claro de "desabilitado" fica acima disso; o azul, abaixo
+}
+"""
