@@ -789,6 +789,8 @@ function StagePanel({ stage, next, artifacts, urls, call, download, projectTitle
 
       {open !== null && gallery[open] && <Lightbox items={gallery} index={open} urls={urls} setIndex={setOpen} download={download} />}
 
+      {stage.stage_key === 'video_prompts' && !payload.skipped && (reviewing || stage.status === 'failed') && <StoryCut stage={stage} call={call} />}
+
       {stage.status === 'failed' && (
         <div className="approval"><div><b>Etapa parada</b><small>Resolva o que foi indicado acima; os itens já prontos são mantidos.</small></div>
           <button disabled={busy} onClick={() => run('retry_stage', { p_stage_id: stage.id }, 'Nova tentativa enfileirada.')}><RotateCcw size={16} /> Tentar novamente</button></div>
@@ -828,6 +830,47 @@ function StagePanel({ stage, next, artifacts, urls, call, download, projectTitle
         </div>
       )}
     </div>
+  );
+}
+
+// Encurtar ou mudar a história depois das imagens prontas: o worker só usa cenas que já têm imagem aprovada.
+function StoryCut({ stage, call }: { stage: Stage; call: Call }) {
+  const active = stage.payload?.story_cut && !stage.payload.story_cut.restore ? stage.payload.story_cut : null;
+  const [minutes, setMinutes] = useState('');
+  const [instruction, setInstruction] = useState('');
+  const [busy, setBusy] = useState(false);
+  const target = Math.round(Number(minutes.replace(',', '.')) * 60) || 0;
+  const valid = (!minutes.trim() || (target >= 30 && target <= 1200)) && (target > 0 || !!instruction.trim());
+
+  async function send(args: Record<string, unknown>, ok: string) {
+    setBusy(true);
+    const done = await call('adjust_story', { p_stage_id: stage.id, ...args }, ok);
+    setBusy(false);
+    if (done) { setMinutes(''); setInstruction(''); }
+  }
+
+  return (
+    <details className="fold storycut">
+      <summary><span>Ajustar a história (sem refazer imagens)</span>{active && <em>ajustada</em>}<ChevronDown size={16} className="chev" /></summary>
+      <div>
+        <p className="muted">Encurte ou mude a história usando só as cenas que já têm imagem aprovada. Nenhuma imagem é gerada de novo; não dá para criar cena, personagem ou figurino novo por aqui.</p>
+        {active && (
+          <div className="storyactive" role="status">
+            <span><b>História ajustada.</b> {[active.target_s ? `Duração pedida: ${(active.target_s / 60).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} min.` : '', active.instruction ?? ''].filter(Boolean).join(' ')}
+              {' '}Pedir ajustes muda só os prompts das cenas que ficaram; para tirar ou trazer cenas, use os campos abaixo.</span>
+            <button className="ghost small" disabled={busy} onClick={() => send({ p_restore: true }, 'Voltando à história completa.')}>Voltar à história completa</button>
+          </div>
+        )}
+        <label>Duração desejada, em minutos (opcional)
+          <input inputMode="decimal" value={minutes} onChange={(e) => setMinutes(e.target.value)} placeholder="ex.: 3" />
+        </label>
+        {target >= 30 && <small className="muted">Cerca de {Math.round(target / 6)} vídeos no Grok. A duração é a soma dos clipes (mínimo de 6 s cada); depois dos cortes na edição, o vídeo pode ficar menor.</small>}
+        <label>O que mudar na história (opcional)
+          <textarea rows={3} maxLength={4000} value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="ex.: focar no campeonato, resumir os ensaios e manter o final em suspense" />
+        </label>
+        <button className="primary" disabled={busy || !valid} onClick={() => send({ p_instruction: instruction.trim() || null, p_target_s: target || null }, 'Pedido enviado; o worker vai montar a história ajustada.')}><RotateCcw size={15} /> Reescrever a história</button>
+      </div>
+    </details>
   );
 }
 

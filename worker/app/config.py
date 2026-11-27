@@ -55,6 +55,8 @@ CLAUDE_PATH = os.getenv("CLAUDE_PATH", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "")
 CLAUDE_EFFORT = os.getenv("CLAUDE_EFFORT", "low")  # low | medium | high | xhigh | max — mais alto = mais lento e mais cota
 CLAUDE_TIMEOUT = _int("CLAUDE_TIMEOUT", 1200)
+# Prompts de vídeo: roteiros com mais cenas que isto são pedidos em lotes (cada lote pronto fica salvo).
+CLIP_BATCH_SCENES = max(5, _int("CLIP_BATCH_SCENES", 20))
 
 # Análise local.
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")

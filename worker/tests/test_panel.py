@@ -557,3 +557,33 @@ def test_model_and_effort_are_chosen_on_creation_and_changed_inside_the_project(
     calls = drive(panel, scenario)
     assert calls[0][0] == "create_factory_project" and calls[0][1]["p_model"] == "claude-opus-5-5" and calls[0][1]["p_effort"] == "high"
     assert ("set_project_effort", {"p_project_id": "11111111-aaaa-bbbb-cccc-000000000001", "p_effort": "max"}) in calls
+
+
+def test_story_can_be_shortened_from_the_video_prompts_stage(panel):
+    async def scenario(page, fake):
+        stage = next(s for s in fake.stages if s["stage_key"] == "video_prompts")
+        stage.update(status="failed", payload={"error": {"code": "LIMIT_REACHED", "message": "limite", "action": "Tente depois.", "blocked": True}})
+        await page.reload()
+        await page.get_by_role("heading", name="Anna und der Hund").wait_for()
+        await page.locator(".stage").nth(stage["stage_order"] - 1).click()
+        await page.get_by_text("Ajustar a história (sem refazer imagens)").click()
+        send = page.get_by_role("button", name="Reescrever a história")
+        assert await send.is_disabled()
+        await page.get_by_label("Duração desejada, em minutos (opcional)").fill("2,5")
+        await page.get_by_text("Cerca de 25 vídeos no Grok").wait_for()
+        await page.get_by_label("O que mudar na história (opcional)").fill("focar no campeonato")
+        await shot(page, "ajustar-historia")
+        await send.click()
+        await page.get_by_text("o worker vai montar a história ajustada").wait_for()
+        stage.update(status="pending_review", payload={"story_cut": {"target_s": 150, "instruction": "focar no campeonato"}})
+        await page.reload()
+        await page.get_by_role("heading", name="Anna und der Hund").wait_for()
+        await page.locator(".stage").nth(stage["stage_order"] - 1).click()
+        await page.get_by_text("Ajustar a história (sem refazer imagens)").click()
+        await page.get_by_text("Duração pedida: 2,5 min.").wait_for()
+        await page.get_by_role("button", name="Voltar à história completa").click()
+        await page.get_by_text("Voltando à história completa.").wait_for()
+        return fake.rpc_calls
+    calls = drive(panel, scenario)
+    assert calls == [("adjust_story", {"p_stage_id": "stage-8", "p_instruction": "focar no campeonato", "p_target_s": 150}),
+                     ("adjust_story", {"p_stage_id": "stage-8", "p_restore": True})]

@@ -17,6 +17,7 @@ export type StagePayload = {
   warnings?: string[];
   error?: StageError;
   review_comment?: string;
+  story_cut?: { instruction?: string; target_s?: number; restore?: boolean };   // prompts de vídeo: história encurtada ou mudada
   local_dir?: string;
   progress?: { done: number; total: number; label: string };
   next_generation?: { service: string; count: number; unit: string };

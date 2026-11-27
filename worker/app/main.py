@@ -249,7 +249,8 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
               feedback=inp.get("feedback"), max_clip=factory.MAX_CLIP_S if profile else config.GROK_MAX_CLIP_SECONDS, profile=profile, chosen=chosen, whisper_model=config.WHISPER_MODEL,
               language=config.REFERENCE_LANGUAGE, plan=project.get("import_plan"), clone=project.get("mode") == "clone", story=story_of(project), direct_sheets=has_no_body_stage(db, project), image_concurrency=config.IMAGE_CONCURRENCY, video_concurrency=config.VIDEO_CONCURRENCY,
               image_slots=(pools or {}).get("image"), video_slots=(pools or {}).get("video"), pilot_approved=bool((stage.get("payload") or {}).get("pilot_approved")),
-              overrides=dict((stage.get("payload") or {}).get("prompt_overrides") or {}), force=set(inp.get("force_items") or []), pause=lambda: asyncio.sleep(config.PAUSE_BETWEEN_ITEMS))
+              overrides=dict((stage.get("payload") or {}).get("prompt_overrides") or {}),
+              story_cut=(stage.get("payload") or {}).get("story_cut") if stage["stage_key"] == "video_prompts" else None, force=set(inp.get("force_items") or []), pause=lambda: asyncio.sleep(config.PAUSE_BETWEEN_ITEMS))
     db.update_stage(stage["id"], status="in_progress", remove=("error", "progress"))
     if kind == "regen_item":
         await adjust_session(db, job, stage, ctx)

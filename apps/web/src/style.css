@@ -410,3 +410,10 @@ footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wr
 .modelinline select + select { margin-left: 2px; }
 .modelinline { flex-wrap: wrap; max-width: 100%; }
 .modelinline select, .modelselects select { min-width: 0; max-width: 100%; }
+/* Ajustar a história na etapa de prompts de vídeo */
+.storycut > div { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.storycut p { margin: 0; }
+.storycut label { display: flex; flex-direction: column; gap: 5px; align-self: stretch; font-size: 13px; font-weight: 600; }
+.storycut input, .storycut textarea { width: 100%; border: 1px solid var(--line-strong); background: var(--bg); color: var(--text); border-radius: 8px; padding: 10px; font: 13px/1.5 inherit; font-weight: 400; resize: vertical; }
+.storyactive { align-self: stretch; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; border: 1px solid var(--line-strong); border-radius: 10px; padding: 10px 12px; font-size: 13px; line-height: 1.5; }
+.storyactive span { flex: 1 1 240px; }

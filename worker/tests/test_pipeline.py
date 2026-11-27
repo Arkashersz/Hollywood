@@ -1027,21 +1027,78 @@ def test_silent_characters_and_off_screen_voices_are_locked_too():
 
 @pytest.mark.parametrize("change, message", [
     ({"timeline": None}, "timeline"),
-    ({"timeline": [{"start_s": 0, "end_s": 2, "action": "Anna turns her head slowly to the left."},
-                   {"start_s": 2.5, "end_s": 5, "action": "Anna turns her head slowly to the right."}]}, "buracos"),
-    ({"timeline": [{"start_s": 0, "end_s": 5, "action": "Anna turns her head slowly to the left."}]}, "no máximo 3 s"),
-    ({"timeline": [{"start_s": 0, "end_s": 2, "action": "Anna moves."}, {"start_s": 2, "end_s": 5, "action": "Anna turns her head to the right."}]}, "curta demais"),
     ({"timeline": [{"start_s": 0, "end_s": 2, "action": "Anna turns her head slowly to the left."}]}, "precisa terminar em 5"),
-    ({"dialogue": [{"speaker": "Anna", "text": "Hallo du da", "start_s": 0.5, "end_s": 2.5}, {"speaker": "Max", "text": "Was?", "start_s": 2.0, "end_s": 3.0}]}, "só uma pessoa fala por vez"),
-    ({"dialogue": [{"speaker": "Anna", "text": "Das ist eine sehr lange Rede mit vielen Worten hier", "start_s": 0.5, "end_s": 1.0}]}, "rápido demais"),
+    ({"timeline": [{"start_s": 0, "end_s": 5, "action": ""}]}, "action"),
+    ({"dialogue": [{"speaker": "Anna", "text": "Wort " * 60, "start_s": 0.5, "end_s": 1.0}]}, "rápido demais"),
     ({"dialogue": [{"speaker": "Fremder", "text": "Hallo", "start_s": 0.5, "end_s": 1.5}]}, "não é um personagem conhecido"),
-    ({"dialogue": [{"speaker": "Anna", "text": "Hallo", "start_s": 4.5, "end_s": 6.0}]}, "fora do clipe"),
     ({"camera": ""}, "camera"),
 ])
 def test_clip_locks_are_checked_before_they_reach_the_video(change, message):
     bible, plan = _two_people()
     with pytest.raises(ValueError, match=message):
-        core.validate_clips({"clips": [_clip(duration_s=5, **change)]}, bible, plan, 15, min_total=0)
+        core.validate_clips({"clips": [_clip(**{"duration_s": 5, **change})]}, bible, plan, 15, min_total=0)
+
+
+def _contiguous(beats, duration):
+    assert beats[0]["start_s"] == 0 and beats[-1]["end_s"] == duration
+    assert all(a["end_s"] == b["start_s"] for a, b in zip(beats, beats[1:]))
+    assert all(0 < b["end_s"] - b["start_s"] <= 3.05 for b in beats)
+
+
+def test_small_timing_slips_are_fixed_instead_of_throwing_away_the_whole_answer():
+    bible, plan = _two_people()
+    check = lambda **change: core.validate_clips({"clips": [_clip(**change)]}, bible, plan, 15, min_total=0)["clips"][0]  # noqa: E731
+
+    long = check(timeline=[{"start_s": 0, "end_s": 3.5, "action": "Anna walks slowly toward the window."},
+                           {"start_s": 4.0, "end_s": 4.6, "action": "Anna moves."}])   # trecho longo, buraco, ação curta, sobra no fim
+    _contiguous(long["timeline"], 5)
+    assert "without restarting" in long["timeline"][1]["action"] and "Everything else holds still" in long["timeline"][-1]["action"]
+
+    overlap = check(dialogue=[{"speaker": "Anna", "text": "Hallo du da", "start_s": 0.5, "end_s": 2.5},
+                              {"speaker": "Max", "text": "Was?", "start_s": 2.0, "end_s": 6.0}])
+    first, second = overlap["lines"]
+    assert first["end_s"] <= second["start_s"] < second["end_s"] <= 5
+
+    talky = check(dialogue=[{"speaker": "Anna", "text": "eins zwei drei vier fünf sechs sieben acht neun zehn elf zwölf dreizehn " * 2, "start_s": 4.5, "end_s": 5}])
+    assert talky["planned_s"] == 8 and talky["duration_s"] == 10, "o clipe cresce para a fala caber"
+    _contiguous(talky["timeline"], 8)
+
+    squeezed = core.validate_clips({"clips": [_clip(dialogue=[{"speaker": "Anna", "text": "Wort " * 60, "start_s": 0, "end_s": 1}])]},
+                                   bible, plan, 15, min_total=0, lenient=True)["clips"][0]
+    assert squeezed["lines"][0]["end_s"] <= squeezed["planned_s"] == 15 and any("longa" in c for c in squeezed["check_pt"])
+
+
+def test_long_script_is_written_in_batches_and_a_retry_continues_where_it_stopped(project, monkeypatch):
+    from app import config
+    ctx, llm, _, _ = project
+    run_until(ctx, "video_prompts")
+    monkeypatch.setattr(config, "CLIP_BATCH_SCENES", 1)
+    base = clips_payload()["clips"]
+    batches = {sid: [c for c in base if c["scene"] == sid][:3] for sid in ("01", "02")}
+    real, asked, broken = llm.ask, [], {"on": True}
+
+    async def ask(prompt, files=None, *, new_chat=True):
+        if "você é o EDITOR" not in prompt:
+            return await real(prompt, files, new_chat=new_chat)
+        sid = "01" if "SOMENTE para as cenas 01," in prompt else "02"
+        asked.append(sid)
+        if sid == "02" and broken["on"]:
+            raise Blocked("LIMIT_REACHED", "limite de 5 horas")
+        return as_json({"order_note_pt": "Em ordem.", "clips": batches[sid]})
+    monkeypatch.setattr(llm, "ask", ask)
+
+    with pytest.raises(Blocked):
+        run(ctx, "video_prompts")
+    assert asked == ["01", "02"] and ctx.data_path("clips-parcial").is_file()
+
+    broken["on"], asked[:] = False, []
+    result = run(ctx, "video_prompts")
+    assert asked == ["02"], "o lote que já estava pronto não é pedido de novo"
+    clips = ctx.load_data("clips")["clips"]
+    assert [c["n"] for c in clips] == [1, 2, 3, 4, 5, 6] and [c["scene"] for c in clips] == ["01"] * 3 + ["02"] * 3
+    assert "6 clipes" in result["summary"] and not ctx.data_path("clips-parcial").is_file()
+    editing = next(a["prompt"] for a in llm.asks if "Documento 09" in a["prompt"] and "clipes-do-video-novo" in a["prompt"])
+    assert "06 · cena 02" in editing
 
 
 def test_editor_is_asked_for_every_lock_and_old_clips_keep_their_prompt(project):
@@ -1053,3 +1110,65 @@ def test_editor_is_asked_for_every_lock_and_old_clips_keep_their_prompt(project)
     assert "ANIMATION LOCK" in video.calls[0]["prompt"] and "SPEAKING RULE" in video.calls[0]["prompt"]
     old = {"prompt": "Anna waves.", "speakers": [], "duration_s": 6}
     assert render.clip_prompt({"characters": []}, old) == "Anna waves.\n\nDuration: 6 seconds. Vertical 9:16.", "projetos já planejados não mudam"
+
+
+def test_story_can_be_cut_after_the_images_reusing_clips_and_then_restored(project, monkeypatch):
+    ctx, llm, _, sink = project
+    run_until(ctx, "video_prompts")
+    ctx.add_adjustment("vid-clipe-01", "mais devagar")
+    images = len(llm.images)
+    real, asked = llm.ask, []
+    answer = {"selection": {"summary_pt": "Só a parte do cachorro.", "scenes": [{"id": "02", "change_pt": ""}]}}
+
+    async def ask(prompt, files=None, *, new_chat=True):
+        if "você é o MONTADOR" in prompt:
+            asked.append("montador")
+            return as_json(answer["selection"])
+        if "TAREFA: você é o EDITOR." in prompt:
+            assert "A HISTÓRIA FOI AJUSTADA" in prompt
+            asked.append("clipes")
+            if answer.get("limit"):
+                raise Blocked("LIMIT_REACHED", "limite de 5 horas")
+            return as_json({"order_note_pt": "ok", "clips": [{**clips_payload()["clips"][0], "prompt": "Rewritten: Anna waves goodbye."}]})
+        return await real(prompt, files, new_chat=new_chat)
+    monkeypatch.setattr(llm, "ask", ask)
+
+    # encurtar: as cenas que ficam reaproveitam os clipes já escritos, sem pedir clipe nenhum
+    result = run(ctx, "video_prompts", story_cut={"target_s": 36, "instruction": "só o cachorro", "request": "a"})
+    clips = ctx.load_data("clips")
+    assert asked == ["montador"] and result["summary"].startswith("História ajustada: 1 de 2 cenas (0 reescrita(s))")
+    assert [c["n"] for c in clips["clips"]] == [1, 2, 3, 4, 5, 6] and {c["scene"] for c in clips["clips"]} == {"02"} and clips["total_s"] == 36
+    # o clipe que continuava de um clipe cortado passa a começar na imagem da própria cena
+    assert clips["clips"][0]["start"] == "scene_image" and clips["clips"][0]["reference_images"][0] == "cena-02"
+    assert "## História ajustada" in sink.documents["doc-08"] and "Só a parte do cachorro." in sink.documents["doc-08"]
+    assert len(llm.images) == images and ctx.adjustments("vid-clipe-01") == [] and not result.get("warnings")
+    assert len(ctx.load_data("clips-completo")["clips"]) == 12, "a história inteira fica guardada"
+
+    # mudar a trama: só a cena marcada é reescrita; se o Claude parar, a escolha das cenas não é refeita
+    answer["selection"] = {"summary_pt": "Despedida.", "scenes": [{"id": "02", "change_pt": ""}, {"id": "01", "change_pt": "vira despedida"}]}
+    answer["limit"], asked[:] = True, []
+    request = {"instruction": "termine com despedida", "request": "b"}
+    with pytest.raises(Blocked):
+        run(ctx, "video_prompts", story_cut=request)
+    assert asked == ["montador", "clipes"]
+    answer["limit"], asked[:] = False, []
+    run(ctx, "video_prompts", story_cut=request)
+    clips = ctx.load_data("clips")["clips"]
+    assert asked == ["clipes"] and [c["scene"] for c in clips] == ["02"] * 6 + ["01"]
+    assert clips[-1]["prompt"].startswith("Rewritten") and not clips[0]["prompt"].startswith("Rewritten")
+
+    # voltar à história completa não pede os clipes de novo
+    asked[:] = []
+    run(ctx, "video_prompts", story_cut={"restore": True, "request": "c"})
+    restored = ctx.load_data("clips")
+    assert asked == [] and len(restored["clips"]) == 12 and "cut" not in restored
+    assert "## História ajustada" not in sink.documents["doc-08"]
+
+
+def test_a_cut_far_from_the_requested_duration_is_sent_back_once(project, monkeypatch):
+    ctx, llm, _, _ = project
+    run_until(ctx, "video_prompts")
+    llm.json_script["você é o MONTADOR"] = [as_json({"summary_pt": "x", "scenes": [{"id": "01"}, {"id": "02"}]}),
+                                            as_json({"summary_pt": "x", "scenes": [{"id": "02"}]})]
+    run(ctx, "video_prompts", story_cut={"target_s": 36, "request": "a"})
+    assert any("somam 72 s" in a["prompt"] for a in llm.asks) and ctx.load_data("clips")["total_s"] == 36

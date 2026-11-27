@@ -305,9 +305,25 @@ def image_catalog(bible: dict, plan: dict, direct: bool = False) -> dict[str, di
     return out
 
 
+def _goal(clips: dict) -> str:
+    cut = clips.get("cut")
+    if not cut:
+        return "meta: acima de 70 s"
+    return f"alvo pedido: {cut['target_s']} s" if cut.get("target_s") else "história ajustada"
+
+
+def _cut_section(clips: dict) -> list[str]:
+    cut = clips.get("cut")
+    if not cut:
+        return []
+    return ["## História ajustada", cut["summary_pt"] or NA,
+            f"Entraram {len(cut['scenes'])} de {cut['total_scenes']} cenas, nesta ordem: {', '.join(cut['scenes'])}. Nenhuma imagem nova é necessária."]
+
+
 def doc08(bible: dict, clips: dict, max_clip: int, catalog: dict | None = None) -> str:
     parts = [
-        f"**Total:** {len(clips['clips'])} clipes · **Soma das durações:** {clips['total_s']} s (meta: acima de 70 s) · **Máximo por clipe usado no planejamento:** {max_clip} s.",
+        f"**Total:** {len(clips['clips'])} clipes · **Soma das durações:** {clips['total_s']} s ({_goal(clips)}) · **Máximo por clipe usado no planejamento:** {max_clip} s.",
+        *_cut_section(clips),
         "O limite real de duração e os controles disponíveis devem ser conferidos na interface do Grok no momento da geração.",
         "## Ordem de criação", clips["order_note_pt"] or "Na ordem numérica dos clipes.",
         "## Como gerar cada clipe", "1. Abrir o Grok no modo de vídeo a partir de imagem.\n2. Anexar a imagem inicial indicada.\n3. Colar o prompt exatamente como está.\n4. Conferir os itens da lista ao receber o clipe e baixar o arquivo original.",

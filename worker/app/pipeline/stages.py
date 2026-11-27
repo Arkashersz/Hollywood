@@ -15,10 +15,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .. import media
+from .. import config, media
 from ..media import slugify
 from ..errors import Blocked
-from . import factory_stages, prompts, render
+from . import factory_stages, prompts, render, story_cut
 from .core import Ctx, adopt_bible, adopt_plan, ask_json, carry_changes, strip_leading_title, validate_bible, validate_clips, validate_plan
 
 ORDER = ["analysis", "script", "character_bible", "character_images", "character_sheets",
@@ -642,30 +642,141 @@ async def scene_images(ctx: Ctx) -> dict:
 # ---------------------------------------------------------------------------
 # 8 · Prompts de vídeo, edição e publicação (texto)  ·  9 · vídeos no Grok
 # ---------------------------------------------------------------------------
+def _forgiving(validate: Callable) -> Callable:
+    """Primeira resposta: conferida com rigor. A corrigida: o que só atrapalha o acabamento vira aviso em vez de parar tudo."""
+    tries = {"n": 0}
+
+    def check(raw):
+        tries["n"] += 1
+        return validate(raw, tries["n"] > 1)
+    return check
+
+
+def clips_signature(ctx: Ctx) -> str:
+    """Muda quando muda algo que entra nos prompts: aí os lotes já escritos não servem mais."""
+    return story_cut.signature(ctx, ctx.feedback or "")
+
+
+async def _clips_in_batches(ctx: Ctx, bible: dict, plan: dict, catalog: dict, size: int) -> dict:
+    """Roteiro longo: os clipes são pedidos em lotes de cenas e cada lote pronto fica guardado. Se o Claude parar no meio
+    (limite de uso, resposta ruim), a nova tentativa continua de onde parou em vez de recomeçar tudo."""
+    scenes = plan["scenes"]
+    groups = [scenes[i:i + size] for i in range(0, len(scenes), size)]
+    signature = clips_signature(ctx)
+    saved = ctx.load_data("clips-parcial") if ctx.data_path("clips-parcial").is_file() else {}
+    done: dict = saved.get("batches", {}) if saved.get("signature") == signature else {}
+    previous = json.loads(_previous_data(ctx, "clips") or "{}").get("clips") or []
+    doc01 = ctx.read_doc("01") if ctx.clone else None
+    clips: list[dict] = []
+    notes: list[str] = []
+    for index, group in enumerate(groups):
+        wanted = [s["id"] for s in group]
+        ready = done.get(str(index))
+        if ready and ready.get("scenes") == wanted:
+            batch = ready["clips"]
+        else:
+            ctx.sink.progress(ctx.stage_key, index, len(groups), f"Escrevendo os prompts das cenas {wanted[0]} a {wanted[-1]}…")
+            ctx.log(f"Pedindo os prompts de vídeo ao Claude · lote {index + 1} de {len(groups)} (cenas {wanted[0]} a {wanted[-1]})…")
+            around = set(wanted) | ({clips[-1]["scene"]} if clips else set())
+            usable = {k: v for k, v in catalog.items() if not k.startswith("cena-") or k[5:] in around}
+            old = [c for c in previous if c.get("scene") in wanted]
+            prompt = prompts.clips(ctx.read_doc("02"), ctx.read_doc("03"), bible, {**plan, "scenes": group}, ctx.max_clip,
+                                   json.dumps({"clips": old}, ensure_ascii=False) if old else None, ctx.feedback, usable,
+                                   ctx.clone, ctx.story, doc01)
+            prompt += prompts.clip_batch(index + 1, len(groups), wanted, clips[-2:])
+
+            def check(raw, lenient, group=group, wanted=wanted, usable=usable, offset=len(clips)):
+                mine = [c for c in raw.get("clips") or [] if isinstance(c, dict) and slugify(str(c.get("scene") or ""), 12) in wanted]
+                out = validate_clips({**raw, "clips": mine}, bible, {**plan, "scenes": group}, ctx.max_clip, set(usable), 0,
+                                     lenient=lenient, offset=offset)
+                missing = [s for s in wanted if s not in {c["scene"] for c in out["clips"]}]
+                if missing:
+                    raise ValueError(f"faltam clipes para as cenas {', '.join(missing)}; cada cena do lote precisa de pelo menos um")
+                return out
+
+            result = await ask_json(ctx.brain, prompt, _forgiving(check))
+            batch = result["clips"]
+            if result.get("order_note_pt"):
+                notes.append(result["order_note_pt"])
+            done[str(index)] = {"scenes": wanted, "clips": batch, "note": result.get("order_note_pt", "")}
+            ctx.save_data("clips-parcial", {"signature": signature, "batches": done})
+        if ready and ready.get("note"):
+            notes.append(ready["note"])
+        for clip in batch:
+            clips.append({**clip, "n": len(clips) + 1})
+    ctx.sink.progress(ctx.stage_key, len(groups), len(groups), "Prompts de vídeo escritos")
+    return {"order_note_pt": notes[0] if notes else "", "clips": clips, "total_s": sum(c["duration_s"] for c in clips)}
+
+
+def _forget_video_notes(ctx: Ctx) -> None:
+    """Os ajustes pedidos nos vídeos são guardados pelo número do clipe: se a lista mudou, não valem mais."""
+    store = ctx._small_store("ajustes")
+    if any(k.startswith("vid-clipe-") for k in store):
+        ctx._save_small_store("ajustes", {k: v for k, v in store.items() if not k.startswith("vid-clipe-")})
+
+
 async def video_prompts(ctx: Ctx) -> dict:
     bible, plan = ctx.load_data("bible"), ctx.load_data("plan")
     prev09, prev10 = ctx.previous("09"), ctx.previous("10")
     catalog = render.image_catalog(bible, plan, ctx.direct_sheets)
-    prompt = prompts.clips(ctx.read_doc("02"), ctx.read_doc("03"), bible, plan, ctx.max_clip, _previous_data(ctx, "clips"), ctx.feedback, catalog, ctx.clone, ctx.story, ctx.read_doc("01") if ctx.clone else None)
-    ctx.log("Pedindo os prompts de vídeo ao Claude…")
-    if ctx.story:   # duração e quantidade de cenas escolhidas pelo usuário (os clipes só têm 6, 10 ou 15 s, então há uma folga)
-        target, scenes = int(ctx.story["target_s"]), int(ctx.story["min_scenes"])
-        check = lambda raw: validate_clips(raw, bible, plan, ctx.max_clip, set(catalog), target - 4, target + 10, scenes)  # noqa: E731
+    warnings: list[str] = []
+    request = ctx.story_cut or {}
+    cutting = bool(request) and not request.get("restore")
+    # Voltar à história completa: os clipes de antes do corte são reaproveitados, sem pedir nada ao Claude.
+    restored = story_cut.full_story(ctx, plan) if request.get("restore") and not ctx.feedback else []
+    if {c["scene"] for c in restored} != {s["id"] for s in plan["scenes"]}:
+        restored = []
+    batched = len(plan["scenes"]) > config.CLIP_BATCH_SCENES
+    if cutting:
+        clips = await story_cut.cut(ctx, bible, plan, catalog, _forgiving)
+        target = clips["cut"]["target_s"]
+        if target and abs(clips["total_s"] - target) > max(12, target * 0.2):
+            warnings.append(f"Os clipes somam {clips['total_s']} s, longe dos {target} s pedidos. Use Ajustar a história de novo se precisar.")
+    elif restored:
+        ctx.log("Voltando à história completa com os clipes já escritos.")
+        clips = {"order_note_pt": "Na ordem numérica dos clipes.", "clips": restored, "total_s": sum(c["duration_s"] for c in restored)}
+    elif batched:
+        clips = await _clips_in_batches(ctx, bible, plan, catalog, config.CLIP_BATCH_SCENES)
+        if ctx.story and abs(clips["total_s"] - int(ctx.story["target_s"])) > max(10, int(ctx.story["target_s"]) * 0.2):
+            warnings.append(f"Os clipes somam {clips['total_s']} s, longe dos {ctx.story['target_s']} s pedidos.")
     else:
-        check = lambda raw: validate_clips(raw, bible, plan, ctx.max_clip, set(catalog), 0 if ctx.clone else 70)  # noqa: E731
-    clips = await ask_json(ctx.brain, prompt, check)
+        prompt = prompts.clips(ctx.read_doc("02"), ctx.read_doc("03"), bible, plan, ctx.max_clip, _previous_data(ctx, "clips"), ctx.feedback, catalog, ctx.clone, ctx.story, ctx.read_doc("01") if ctx.clone else None)
+        ctx.log("Pedindo os prompts de vídeo ao Claude…")
+        if ctx.story:   # duração e quantidade de cenas escolhidas pelo usuário (os clipes só têm 6, 10 ou 15 s, então há uma folga)
+            target, scenes = int(ctx.story["target_s"]), int(ctx.story["min_scenes"])
+            check = lambda raw, lenient: validate_clips(raw, bible, plan, ctx.max_clip, set(catalog), target - 4, target + 10, scenes, lenient=lenient)  # noqa: E731
+        else:
+            check = lambda raw, lenient: validate_clips(raw, bible, plan, ctx.max_clip, set(catalog), 0 if ctx.clone else 70, lenient=lenient)  # noqa: E731
+        clips = await ask_json(ctx.brain, prompt, _forgiving(check))
+    if ctx.data_path("clips").is_file() and [c["scene"] for c in ctx.load_data("clips")["clips"]] != [c["scene"] for c in clips["clips"]]:
+        _forget_video_notes(ctx)
+    if not cutting:
+        story_cut.save_full(ctx, clips["clips"])
     ctx.save_data("clips", clips)
     ctx.write_doc("08", render.doc08(bible, clips, ctx.max_clip, catalog))
     ctx.log("Pedindo o plano de edição ao Claude…")
-    ctx.write_doc("09", await ctx.brain.ask(prompts.doc09(prev09, ctx.feedback), [], new_chat=False))
+    edit_plan = prompts.doc09(prev09, ctx.feedback)
+    apart = batched or cutting or bool(restored)
+    if apart:   # a conversa não tem o vídeo inteiro: vão o Documento 02 e a lista de clipes
+        edit_plan += prompts.doc09_context(ctx.read_doc("02"), clips["clips"])
+        if cutting:
+            edit_plan += f"A história foi ajustada para este vídeo: {clips['cut']['summary_pt']}\n"
+    ctx.write_doc("09", await ctx.brain.ask(edit_plan, [], new_chat=apart))
     metadata = {}
     evidence_file = ctx.dir / "referencia" / "evidencias.json"
     if evidence_file.is_file():
         metadata = json.loads(evidence_file.read_text(encoding="utf-8")).get("metadata") or {}
     ctx.log("Pedindo o kit de publicação ao Claude…")
     ctx.write_doc("10", await ctx.brain.ask(prompts.doc10(metadata, prev10, ctx.feedback), [], new_chat=False))
-    return {"summary": f"{len(clips['clips'])} clipes planejados, somando {clips['total_s']} s; plano de edição e kit de publicação prontos.",
-            "next_generation": {"service": "Grok", "count": len(clips["clips"]), "unit": "vídeos"}}
+    ctx.data_path("clips-parcial").unlink(missing_ok=True)   # etapa concluída: a próxima execução escreve tudo de novo
+    summary = f"{len(clips['clips'])} clipes planejados, somando {clips['total_s']} s; plano de edição e kit de publicação prontos."
+    if cutting:
+        info = clips["cut"]
+        summary = (f"História ajustada: {len(info['scenes'])} de {info['total_scenes']} cenas ({info['rewritten']} reescrita(s)), "
+                   f"sem nenhuma imagem nova. {summary}")
+    return {"summary": summary,
+            "next_generation": {"service": "Grok", "count": len(clips["clips"]), "unit": "vídeos"},
+            **({"warnings": warnings} if warnings else {})}
 
 
 async def production(ctx: Ctx) -> dict:

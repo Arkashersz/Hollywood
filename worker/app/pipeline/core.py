@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -95,6 +96,7 @@ class Ctx:
     direct_sheets: bool = False     # sem a etapa de imagens de corpo inteiro: a folha 9:16 sai direto da descrição
     story: dict | None = None       # história criada a partir de uma ideia: {idea, target_s, min_scenes}
     plan: dict | None = None        # prompts trazidos prontos pelo usuário (projeto iniciado numa etapa avançada)
+    story_cut: dict | None = None   # prompts de vídeo: o usuário pediu para encurtar ou mudar a história
     profile: dict | None = None     # Fábrica de roteiros: perfil de produção (Fase 0) já normalizado
     chosen: int | None = None       # Fábrica: número da proposta que o usuário escolheu desenvolver (None = a recomendada)
     _generated: dict = field(default_factory=dict)
@@ -242,6 +244,18 @@ def _build_library(parent: Path, mine: Path) -> None:
     (mine / "dados" / "biblioteca.json").write_text(json.dumps(index, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def _cut_note(parent: Path) -> str:
+    """Se o vídeo anterior saiu com a história ajustada, a continuação parte do que foi ao ar, não do roteiro inteiro."""
+    try:
+        cut = json.loads((parent / "dados" / "clips.json").read_text(encoding="utf-8")).get("cut")
+    except (OSError, ValueError):
+        return ""
+    if not cut:
+        return ""
+    return (f"\n\nATENÇÃO: o vídeo publicado desta parte teve a história ajustada depois do roteiro. Vale esta versão: {cut['summary_pt']} "
+            f"(só entraram as cenas {', '.join(cut['scenes'])}).")
+
+
 def sequel_context(project: dict, projects_dir: Path) -> dict | None:
     """Contexto de uma continuação. A história e a biblioteca da série (personagens e ambientes já criados) são copiadas para a
     pasta do projeto na primeira vez, então apagar o projeto anterior depois não quebra a parte 2."""
@@ -259,6 +273,7 @@ def sequel_context(project: dict, projects_dir: Path) -> dict | None:
                                            "gere a continuação no computador onde o projeto anterior foi produzido.")
         earlier = (parent / "historia-anterior.md").read_text(encoding="utf-8") if (parent / "historia-anterior.md").is_file() else ""
         story = (earlier.strip() + f"\n\n# PARTE {part - 1}\n\n" + script.read_text(encoding="utf-8")[:9000]).strip()
+        story += _cut_note(parent)
         mine.mkdir(parents=True, exist_ok=True)
         _build_library(parent, mine)
         story_file.write_text(story, encoding="utf-8")
@@ -496,41 +511,67 @@ def _seconds(obj: dict, key: str, where: str) -> float:
     return value
 
 
+def split_long_beats(beats: list[dict]) -> list[dict]:
+    """Trecho maior que MAX_BEAT_S vira trechos iguais e contínuos (o movimento segue, sem recomeçar)."""
+    out = []
+    for beat in beats:
+        length = beat["end_s"] - beat["start_s"]
+        parts = max(1, math.ceil((length - 0.05) / MAX_BEAT_S))
+        for k in range(parts):
+            start = round(beat["start_s"] + length * k / parts, 2)
+            end = beat["end_s"] if k == parts - 1 else round(beat["start_s"] + length * (k + 1) / parts, 2)
+            action = beat["action"] if k == 0 else f"The same movement keeps going and finishes smoothly, without restarting: {beat['action']}"
+            out.append({"start_s": start, "end_s": end, "action": action})
+    return out
+
+
 def validate_timeline(raw, duration: float, where: str) -> list[dict]:
-    """Animação do clipe em trechos contínuos, de 0 até a duração, sem buracos, cada um com no máximo MAX_BEAT_S."""
+    """Animação do clipe em trechos contínuos, de 0 até a duração, sem buracos, cada um com no máximo MAX_BEAT_S.
+    Deslizes de conta (trecho longo, buraco, sobreposição, sobra no fim) são corrigidos aqui: recusar a resposta inteira por
+    isso jogava fora dezenas de clipes bons. Só é recusado o que falta de verdade (sem descrição ou com metade do clipe vazia)."""
     if not isinstance(raw, list) or not raw:
         raise ValueError(f'{where}: "timeline" precisa descrever a animação em trechos com tempo (start_s, end_s, action), de 0.0 a {duration:g} s')
-    out, cursor = [], 0.0
+    out: list[dict] = []
+    cursor, held = 0.0, ""
     for j, beat in enumerate(raw, 1):
         w = f"{where}.timeline[{j}]"
         if not isinstance(beat, dict):
             raise ValueError(f"{w} não é um objeto")
-        start, end = _seconds(beat, "start_s", w), _seconds(beat, "end_s", w)
-        if abs(start - cursor) > 0.15:
-            raise ValueError(f"{w}: começa em {start:g} s, mas precisa começar em {cursor:g} s"
-                             + (" (onde o trecho anterior termina; a linha do tempo não pode ter buracos nem sobreposições)" if j > 1 else ""))
-        if end <= cursor:
-            raise ValueError(f"{w}: termina em {end:g} s, antes de começar")
-        if end - cursor > MAX_BEAT_S + 0.05:
-            raise ValueError(f"{w}: trecho de {end - cursor:.1f} s; divida em trechos de no máximo {MAX_BEAT_S:g} s, descrevendo cada movimento")
+        _seconds(beat, "start_s", w)
+        end = min(_seconds(beat, "end_s", w), float(duration))
         action = _text(beat, "action", w)
+        if end <= cursor + 0.05:   # trecho sem tempo próprio: a ação acontece junto com a vizinha
+            if out:
+                out[-1]["action"] += f" At the same time: {action}"
+            else:
+                held = f"{action} Then: "
+            continue
+        action, held = held + action, ""
         if len(action) < 20:
-            raise ValueError(f'{w}: "action" curta demais; descreva corpo, mãos, olhar, expressão e boca de cada personagem visível')
+            action += " Everything else holds still."
         out.append({"start_s": cursor, "end_s": end, "action": action})
         cursor = end
-    if abs(cursor - duration) > 0.3:
+    if not out or cursor < duration * 0.6 - 0.05:
         raise ValueError(f"{where}: a linha do tempo termina em {cursor:g} s; precisa terminar em {duration:g} s (a duração do clipe)")
     out[-1]["end_s"] = float(duration)
-    return out
+    return split_long_beats(out)
 
 
-def validate_dialogue(raw, names: dict[str, str], duration: float, where: str, words_per_second: float = WORDS_PER_SECOND_DE) -> list[dict]:
-    """Falas com quem fala, o texto, o início e o fim. Uma pessoa por vez e tempo suficiente para dizer cada fala."""
+def speech_seconds(text: str, words_per_second: float = WORDS_PER_SECOND_DE) -> float:
+    """O menor tempo em que a fala ainda soa natural (fala rápida)."""
+    return max(0.4, count_words(text) / (words_per_second * 1.3) - 0.25)
+
+
+def validate_dialogue(raw, names: dict[str, str], duration: float, where: str, words_per_second: float = WORDS_PER_SECOND_DE,
+                      strict: bool = True) -> list[dict]:
+    """Falas com quem fala, o texto, o início e o fim: uma pessoa por vez e tempo suficiente para cada uma.
+    Horários que não fecham são redistribuídos dentro do clipe. Fala que não cabe nem assim: com `strict`, o Claude é avisado;
+    sem ele, as falas são apertadas na proporção do tamanho (e o clipe ganha um aviso para conferência)."""
     if raw in (None, "", []):
         return []
     if not isinstance(raw, list):
         raise ValueError(f'{where}: "dialogue" precisa ser uma lista')
-    out, cursor = [], 0.0
+    lines = []
     for j, line in enumerate(raw, 1):
         w = f"{where}.dialogue[{j}]"
         if not isinstance(line, dict):
@@ -541,21 +582,30 @@ def validate_dialogue(raw, names: dict[str, str], duration: float, where: str, w
             raise ValueError(f'{w}: quem fala ("{said}") não é um personagem conhecido (use {sorted(names.values())})')
         text = _text(line, "text", w)
         start, end = _seconds(line, "start_s", w), _seconds(line, "end_s", w)
-        if end <= start or end > duration + 0.05:
-            raise ValueError(f"{w}: a fala vai de {start:g} a {end:g} s, fora do clipe de {duration:g} s")
-        if start < cursor - 0.05:
-            raise ValueError(f"{w}: começa em {start:g} s, antes de a fala anterior terminar ({cursor:g} s); só uma pessoa fala por vez")
-        words = count_words(text)
-        if (end - start) + 0.3 < words / (words_per_second * 1.3):
-            raise ValueError(f"{w}: {words} palavras em {end - start:.1f} s é rápido demais; reserve cerca de {words / words_per_second:.1f} s ou divida a fala entre clipes")
-        out.append({"speaker": speaker, "start_s": start, "end_s": min(end, float(duration)), "text": text,
-                    "delivery": _text(line, "delivery", w, required=False) or _text(line, "delivery_en", w, required=False)})
-        cursor = end
-    return out
+        lines.append({"speaker": speaker, "start_s": start, "end_s": end, "text": text,
+                      "delivery": _text(line, "delivery", w, required=False) or _text(line, "delivery_en", w, required=False)})
+    need = [speech_seconds(line["text"], words_per_second) for line in lines]
+    squeeze = 1.0
+    if sum(need) > duration + 0.05:
+        if strict:
+            words = sum(count_words(line["text"]) for line in lines)
+            raise ValueError(f"{where}.dialogue: {words} palavras em {duration:g} s é rápido demais; reserve cerca de "
+                             f"{words / words_per_second:.1f} s ou divida a fala entre clipes")
+        squeeze = duration / sum(need)
+    cursor = 0.0
+    for j, line in enumerate(lines):
+        least = need[j] * squeeze
+        after = sum(need[j + 1:]) * squeeze   # tempo que as próximas falas ainda precisam
+        start = max(cursor, min(line["start_s"], duration - after - least))
+        end = min(max(line["end_s"], start + least), duration - after)
+        line["start_s"], line["end_s"] = round(start, 2), round(end, 2)
+        cursor = line["end_s"]
+    return lines
 
 
 def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int, catalog: set[str] | None = None, min_total: int = 70,
-                   max_total: int = 0, min_clips: int = 0) -> dict:
+                   max_total: int = 0, min_clips: int = 0, lenient: bool = False, offset: int = 0) -> dict:
+    """`lenient`: segunda resposta do Claude (fala apertada vira aviso em vez de recusa). `offset`: clipes que vieram antes (lotes)."""
     scene_ids = {s["id"] for s in plan["scenes"]}
     names = {c["name"].casefold(): c["name"] for c in bible["characters"]}
     cast_of = {s["id"]: list(s.get("characters") or []) for s in plan["scenes"]}
@@ -577,9 +627,16 @@ def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int, catalog: s
         if not 1 <= duration <= max_clip:
             raise ValueError(f'{where}: "duration_s" = {duration} está fora de 1–{max_clip} s')
         timeline = validate_timeline(c.get("timeline"), duration, where)
-        lines = validate_dialogue(c.get("dialogue"), names, duration, where)
+        said = [d for d in c.get("dialogue") or [] if isinstance(d, dict)]
+        need = math.ceil(sum(speech_seconds(str(d.get("text") or "")) for d in said) - 0.05) if said else 0
+        if duration < need:   # a fala pede mais tempo que o planejado: o clipe cresce até o que o Grok permite
+            duration = min(need, max_clip)
+            timeline[-1]["end_s"] = float(duration)
+            timeline = split_long_beats(timeline)
+        tight = need > max_clip
+        lines = validate_dialogue(c.get("dialogue"), names, duration, where, strict=not lenient)
         planned, duration = duration, snap_duration(duration, max_clip)   # o Grok só faz 6, 10 ou 15 s
-        start = "previous_last_frame" if "previous" in str(c.get("start", "")).lower() and i > 1 else "scene_image"
+        start = "previous_last_frame" if "previous" in str(c.get("start", "")).lower() and i + offset > 1 else "scene_image"
         speakers = list(dict.fromkeys(line["speaker"] for line in lines))
         refs = _strings(c, "reference_images")
         if catalog is not None:
@@ -590,12 +647,13 @@ def validate_clips(raw: dict, bible: dict, plan: dict, max_clip: int, catalog: s
                 raise ValueError(f'{where}: "reference_images" precisa ter de 1 a 3 ids diferentes')
             if not refs and start != "previous_last_frame":
                 raise ValueError(f'{where}: informe em "reference_images" a(s) imagem(ns) deste clipe (a primeira é o quadro inicial)')
-        clips.append({"n": i, "scene": scene, "cast": cast_of.get(scene, []), "duration_s": duration, "planned_s": planned, "start": start, "reference_images": refs,
+        clips.append({"n": i + offset, "scene": scene, "cast": cast_of.get(scene, []), "duration_s": duration, "planned_s": planned, "start": start, "reference_images": refs,
                       "prompt": _text(c, "prompt", where), "timeline": timeline, "camera": _text(c, "camera", where), "keep": _strings(c, "keep"),
                       "ambient": _text(c, "ambient", where, required=False), "lines": lines, "language_en": "German",
                       "speakers": speakers, "dialogue_de": "\n".join(f"{line['speaker']}: {line['text']}" for line in lines),
                       "dialogue_pt": _text(c, "dialogue_pt", where, required=False),
-                      "continuity_pt": _text(c, "continuity_pt", where, required=False), "check_pt": _strings(c, "check_pt")})
+                      "continuity_pt": _text(c, "continuity_pt", where, required=False), "check_pt": _strings(c, "check_pt")
+                      + (["A fala é longa para este clipe: confira se sai inteira; se cortar, divida em dois clipes."] if tight else [])})
     total = sum(c["duration_s"] for c in clips)
     if len(clips) < min_clips:
         raise ValueError(f"há {len(clips)} clipe(s); o usuário pediu no mínimo {min_clips} cenas, então são necessários pelo menos {min_clips} clipes")

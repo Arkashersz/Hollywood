@@ -167,6 +167,12 @@ Todo clipe planejado a partir de agora (link, cópia fiel, ideia, continuação 
 - **Design lock**: a descrição fixa de cada personagem (com os ajustes aprovados nas imagens), sem mudar roupa, cor ou acessório.
 - **Continuity lock**: objetos (quem segura e em qual mão), posições, portas e luzes que não mudam; nada aparece ou some sem a ação mostrar.
 
+Deslizes de tempo na resposta do Claude (trecho com mais de 3 s, buraco, falas encavaladas ou apertadas) são corrigidos pelo worker em vez de derrubar a etapa. Só é recusado o que falta de verdade (cena sem descrição, personagem desconhecido, fala que não cabe nem no maior clipe, que vira aviso na segunda tentativa).
+
+**Roteiros longos** (mais de 20 cenas, ajustável em `CLIP_BATCH_SCENES`) têm os prompts de vídeo pedidos em lotes. Cada lote pronto fica salvo (`dados/clips-parcial.json`): se o limite de uso do Claude chegar ou algo falhar, **Tentar novamente** continua de onde parou.
+
+**Ajustar a história sem refazer imagens:** na etapa "Prompts de vídeo" (parada ou em revisão), abra **Ajustar a história**, informe a duração desejada (soma dos clipes) e/ou o que mudar. O Claude escolhe quais cenas já ilustradas entram; os clipes já escritos são reaproveitados e só as cenas que precisam costurar a trama são reescritas. **Voltar à história completa** desfaz o corte. Não cria cena, personagem nem figurino novo. Se a etapa já foi aprovada, use antes **Voltar para esta etapa**. Exige a migração `0022_story_cut.sql`.
+
 Projetos que já passaram da etapa de prompts de vídeo mantêm os prompts antigos; para ganhar as travas, volte à etapa "Prompts de vídeo" e peça para refazer.
 
 ## Criar a partir de uma ideia de história

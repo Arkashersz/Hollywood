@@ -458,4 +458,35 @@ await as(B);
 await fails(`select set_project_effort($1, 'max')`, [ef1.id], /not found|access denied/);
 step('esforço: escolhido na criação de cada tipo de projeto, herdado pela continuação, trocado depois; só o dono');
 
+// ajustar a história na etapa de prompts de vídeo
+await as(A);
+const [hp] = await q(`select * from create_project('História', 'https://tiktok.com/h1', 'clone')`);
+await as(null, 'service_role');
+await db.query(`update jobs set status='succeeded' where project_id=$1`, [hp.id]);
+await db.query(`update project_stages set status='failed', payload='{"error":{"code":"X"},"review_comment":"antigo"}'::jsonb where project_id=$1 and stage_key='video_prompts'`, [hp.id]);
+await db.query(`update project_stages set payload='{"prompt_overrides":{"vid-clipe-01":"x"}}'::jsonb where project_id=$1 and stage_key='production'`, [hp.id]);
+const [hs] = await q(`select * from project_stages where project_id=$1 and stage_key='video_prompts'`, [hp.id]);
+const [hx] = await q(`select * from project_stages where project_id=$1 and stage_key='script'`, [hp.id]);
+await as(B);
+await fails(`select adjust_story($1, 'curto', 120)`, [hs.id], /Stage not found/);
+await as(A);
+await fails(`select adjust_story($1, 'curto', 120)`, [hx.id], /prompts de vídeo/);
+await fails(`select adjust_story($1)`, [hs.id], /duração desejada/);
+await fails(`select adjust_story($1, null, 5)`, [hs.id], /entre 30 segundos/);
+await fails(`select adjust_story($1, null, null, true)`, [hs.id], /já está completa/);
+let [h] = await q(`select * from adjust_story($1, ' focar no campeonato ', 180)`, [hs.id]);
+assert.equal(h.status, 'queued'); assert.equal(h.current_version, hs.current_version + 1);
+assert.equal(h.payload.story_cut.instruction, 'focar no campeonato'); assert.equal(h.payload.story_cut.target_s, 180);
+assert.ok(!h.payload.error && !h.payload.review_comment);
+assert.deepEqual((await q(`select payload from project_stages where project_id=$1 and stage_key='production'`, [hp.id]))[0].payload, {});
+assert.equal((await q(`select * from jobs where stage_id=$1 and status='queued' and job_type='run_stage'`, [hs.id])).length, 1);
+await fails(`select adjust_story($1, 'outra')`, [hs.id], /não está pronta/);
+await as(null, 'service_role');
+await db.query(`update jobs set status='succeeded' where stage_id=$1`, [hs.id]);
+await db.query(`update project_stages set status='pending_review' where id=$1`, [hs.id]);
+await as(A);
+[h] = await q(`select * from adjust_story($1, null, null, true)`, [hs.id]);
+assert.equal(h.payload.story_cut.restore, true);
+step('adjust_story: encurtar e voltar à história completa na etapa de prompts de vídeo; só o dono');
+
 console.log('Todas as verificações de SQL passaram.');

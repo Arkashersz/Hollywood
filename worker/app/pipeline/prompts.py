@@ -618,6 +618,77 @@ HOOK_CLIP = """GANCHO E FINAL NOS CLIPES (obrigatório):
 HOOK_CLIP_STORY = """GANCHO DE 5 SEGUNDOS (substitui "antes dos 3 s" acima): o impacto máximo do clipe 1 cai antes dos 5 s e não há um único segundo de respiro entre 0 e 5 s."""
 
 
+def clip_batch(number: int, total: int, scene_ids: list[str], before: list[dict]) -> str:
+    tail = [{"scene": c["scene"], "prompt": c["prompt"], "last_action": c["timeline"][-1]["action"]} for c in before]
+    return f"""
+
+LOTE {number} DE {total} (o vídeo é longo e os clipes são pedidos por partes):
+- Escreva clipes SOMENTE para as cenas {', '.join(scene_ids)}, na ordem, pelo menos um por cena. As outras cenas já foram ou serão pedidas à parte.
+- A regra da duração total vale para o vídeo inteiro: aqui, apenas siga o roteiro nas cenas deste lote.
+- {"O gancho do clipe 1 vale para este lote." if number == 1 else "NÃO há gancho de abertura aqui: este lote continua o vídeo."}
+- {"O final em suspense vale para o último clipe deste lote." if number == total else "NÃO encerre a história aqui: o vídeo continua depois deste lote."}
+{("- Os clipes imediatamente anteriores, para a continuidade (não os repita): " + json.dumps(tail, ensure_ascii=False)) if tail else ""}
+Devolva o mesmo objeto JSON, só com os clipes deste lote."""
+
+
+def story_selection(doc03_md: str, scene_rows: str, target_s: int | None, instruction: str | None, previous: dict | None, clone: bool = False) -> str:
+    before = (f"\nCorte feito antes (o pedido novo pode se referir a ele): cenas {', '.join(previous['scenes'])}. {previous.get('summary_pt', '')}" if previous else "")
+    goal = (f"A soma dos segundos das cenas que ficam deve ser o mais próxima possível de {target_s} segundos." if target_s
+            else "Não há duração obrigatória: mantenha o tamanho, a não ser que o pedido diga o contrário.")
+    return f"""{CLONE_BASE if clone else BASE}
+
+TAREFA: você é o MONTADOR. O roteiro foi aprovado e TODAS as cenas abaixo já têm a imagem-base pronta. O usuário quer ajustar a história SEM gerar imagem nova: escolha quais cenas entram no vídeo, em que ordem, e quais precisam de fala ou ação reescrita para a história continuar fazendo sentido.
+
+{data('documento-03-roteiro', doc03_md)}
+
+{data('cenas-com-imagem-pronta (id | segundos de clipe | ambiente e personagens | plano | falas)', scene_rows)}
+
+PEDIDO DO USUÁRIO: {instruction or "encurtar a história, mantendo o que é essencial"}
+{goal}{before}
+
+Regras:
+- Use só ids da lista, sem repetir. Não existe cena, personagem, ambiente nem figurino novo, e o que a imagem-base mostra não muda: só ação, atuação e falas.
+- Mantenha começo, meio e fim claros. A primeira cena precisa funcionar como gancho e a última como final em suspense.
+- Corte blocos inteiros que não fazem falta (repetições, passos de dança parecidos, reações duplicadas) em vez de deixar buracos na trama.
+- "change_pt" fica VAZIO quando a cena pode ficar como está (prefira assim). Preencha só quando a fala ou a ação dela precisa mudar para costurar o corte ou atender o pedido.
+
+Devolva:
+{{"summary_pt": "como fica a história, o que saiu e o que mudou (5 a 10 linhas)", "scenes": [{{"id": "01", "change_pt": ""}}]}}
+{JSON_OUT}"""
+
+
+def cut_clips(summary: str, instruction: str | None, scene_ids: list[str], changes: dict, around: list[tuple[str, str]], first: str, last: str) -> str:
+    todo = "\n".join(f"- cena {s}: {changes.get(s) or 'ajuste só o necessário para ligar com as cenas vizinhas'}" for s in scene_ids)
+    order = "\n".join(f"{s}: {text}" for s, text in around)
+    return f"""
+
+A HISTÓRIA FOI AJUSTADA (isto vale ACIMA do roteiro, da regra de duração total e das regras de clipe 1 e de último clipe):
+- Como ficou: {summary}
+- Pedido do usuário: {instruction or "encurtar a história"}
+- Escreva clipes SOMENTE para as cenas {', '.join(scene_ids)}, pelo menos um por cena. O que muda:
+{todo}
+- Você pode reescrever, encurtar ou criar falas curtas em alemão para a história fazer sentido; a ação precisa partir do que a imagem-base mostra.
+- Use "start": "scene_image".
+- {f"A cena {first} abre o vídeo: gancho imediato." if first in scene_ids else "Não há gancho de abertura nestas cenas."}
+- {f"A cena {last} fecha o vídeo: segure o suspense." if last in scene_ids else "Não encerre a história nestas cenas."}
+
+{data('vizinhas-no-video-final (cena: o que acontece)', order)}
+
+Devolva o mesmo objeto JSON, só com os clipes destas cenas."""
+
+
+def doc09_context(doc02_md: str, clips_list: list[dict]) -> str:
+    rows = "\n".join(f"{c['n']:02d} · cena {c['scene']} · {c['duration_s']} s · {c['dialogue_de'].replace(chr(10), ' / ') or '(sem fala)'}" for c in clips_list)
+    return f"""
+
+Material para o plano (o Documento 02 e a lista completa dos clipes):
+{data('documento-02-edicao-da-referencia', doc02_md)}
+
+{data('clipes-do-video-novo', rows)}
+
+"""
+
+
 def doc09(previous: str | None, feedback: str | None) -> str:
     return f"""Agora escreva o Documento 09 · Plano de edição no CapCut para o vídeo novo, baseado no Documento 02 e nos clipes que você acabou de definir.
 
