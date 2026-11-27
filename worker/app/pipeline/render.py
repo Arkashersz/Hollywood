@@ -220,6 +220,10 @@ def doc04(bible: dict, direct: bool = False) -> str:
         parts += [f"## {ch['name']}", f"**Papel:** {ch['role_pt'] or NA}"]
         if ch.get("reused"):
             parts.append("**Já existe (parte anterior):** descrição, voz e imagem reaproveitadas; este personagem não é gerado de novo.")
+        elif ch.get("variant_of"):
+            parts.append(f"**Variante de figurino de {ch['variant_of']}:** mesmo rosto, corpo e voz, com o visual novo abaixo; ganha folha própria.")
+        elif ch.get("new_look"):
+            parts.append("**Visual novo nesta parte:** mesmo personagem e mesma voz; a folha é gerada de novo com a descrição abaixo.")
         if ch["voice_only"]:
             parts.append("Personagem só de voz (sem imagem). Veja o Documento 06.")
             continue

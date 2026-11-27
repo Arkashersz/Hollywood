@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 
 import pytest
 from PIL import Image
@@ -133,6 +134,111 @@ def test_regen_failure_keeps_stage_in_review(world):
     assert outcome["status"] == "blocked"
     stage = db.stages["character_images"]
     assert stage["status"] == "pending_review" and stage["payload"]["error"]["code"] == "LIMIT_REACHED"
+
+
+class LiveQueue:
+    """Pedidos que chegam do painel enquanto o worker está ajustando."""
+
+    def __init__(self, db, monkeypatch):
+        self.db, self.queued = db, []
+        db.claim_regen_jobs = self.claim
+        monkeypatch.setattr(config, "POLL_SECONDS", 0.02)
+        monkeypatch.setattr(config, "PAUSE_BETWEEN_ITEMS", 0)
+        monkeypatch.setattr(config, "IMAGE_CONCURRENCY", 3)
+
+    def ask(self, stage: str, key: str, comment: str, **extra) -> dict:
+        job = self.db.job("regen_item", stage, item_key=key, comment=comment, **extra)
+        self.db.jobs[job["id"]] = {"status": "queued"}
+        self.queued.append(job)
+        return job
+
+    def claim(self, stage_id):
+        mine = [j for j in self.queued if j["stage_id"] == stage_id]
+        self.queued = [j for j in self.queued if j["stage_id"] != stage_id]
+        for job in mine:
+            self.db.jobs[job["id"]] = {"status": "running"}
+        return mine
+
+
+def _slow_images(llm, monkeypatch, log, during=None, fail=()):
+    """Geração com duração, para ver o que acontece ao mesmo tempo."""
+    real = llm.generate_image
+
+    async def slow(prompt, refs, out, **kw):
+        log.append(("start", out.name))
+        if during:
+            during(out.name)
+        await asyncio.sleep(0.2)
+        if out.name in fail:
+            log.append(("fail", out.name))
+            raise Blocked("TIMEOUT", "demorou demais")
+        info = await real(prompt, refs, out, **kw)
+        log.append(("end", out.name))
+        return info
+    monkeypatch.setattr(llm, "generate_image", slow)
+
+
+ANNA, HUND = "img-personagem-anna-corpo", "img-personagem-b-ser-hund-corpo"
+
+
+def test_adjustment_asked_during_another_runs_at_the_same_time(world, monkeypatch):
+    db, llm, _, run = world
+    for stage_key in ("analysis", "script", "character_bible", "character_images"):
+        run("run_stage", stage_key)
+    live, log, extra = LiveQueue(db, monkeypatch), [], []
+
+    def during(name):
+        if "anna" in name and not extra:   # o usuário pede o segundo enquanto o primeiro está sendo gerado
+            extra.append(live.ask("character_images", HUND, "pelo mais claro"))
+            assert db.stages["character_images"]["status"] == "in_progress"
+    _slow_images(llm, monkeypatch, log, during)
+
+    outcome = run("regen_item", "character_images", item_key=ANNA, comment="mais jovem")
+    assert outcome["status"] == "succeeded" and db.jobs[extra[0]["id"]]["status"] == "succeeded"
+    assert [kind for kind, _ in log] == ["start", "start", "end", "end"], "o segundo começa sem esperar o primeiro terminar"
+    stage = db.stages["character_images"]
+    assert stage["status"] == "pending_review" and "progress" not in stage["payload"] and "error" not in stage["payload"]
+    sent = [i["prompt"] for i in llm.images[-2:]]
+    assert any("mais jovem" in p for p in sent) and any("pelo mais claro" in p for p in sent)
+
+
+def test_one_failed_adjustment_does_not_stop_the_others_and_late_requests_are_not_lost(world, monkeypatch):
+    db, llm, _, run = world
+    for stage_key in ("analysis", "script", "character_bible", "character_images"):
+        run("run_stage", stage_key)
+    live, log, extra = LiveQueue(db, monkeypatch), [], []
+    _slow_images(llm, monkeypatch, log, lambda name: extra or "anna" not in name or extra.append(live.ask("character_images", HUND, "b")),
+                 fail=("personagem-anna-corpo.png",))
+    original = db.update_stage
+
+    def update(stage_id, **kw):
+        original(stage_id, **kw)
+        if kw.get("status") == "pending_review" and len(extra) == 1:   # pedido que chega bem quando a etapa está voltando
+            extra.append(live.ask("character_images", HUND, "pedido de última hora", prompt="Prompt novo do Hund"))
+            db.stages[stage_id]["status"] = "queued"
+    db.update_stage = update
+
+    outcome = run("regen_item", "character_images", item_key=ANNA, comment="a")
+    assert outcome["status"] == "blocked" and [db.jobs[j["id"]]["status"] for j in extra] == ["succeeded", "succeeded"]
+    assert "Prompt novo do Hund" in llm.images[-1]["prompt"], "o prompt editado vale para o pedido que chegou depois"
+    stage = db.stages["character_images"]
+    assert stage["status"] == "pending_review" and stage["payload"]["error"]["code"] == "TIMEOUT"
+    assert stage["payload"]["prompt_overrides"][HUND] == "Prompt novo do Hund"
+
+
+def test_adjustment_that_depends_on_a_running_one_waits_for_it(world, monkeypatch):
+    db, llm, _, run = world
+    for stage_key in ("analysis", "script", "character_bible", "character_images", "character_sheets", "visual_plan", "scene_images"):
+        assert run("run_stage", stage_key)["status"] == "succeeded"
+    plan = json.loads((config.PROJECTS_DIR / "Teste" / "dados" / "plan.json").read_text(encoding="utf-8"))
+    scene, env = plan["scenes"][0], next(e for e in plan["environments"] if e["name"] == plan["scenes"][0]["environment"])
+    live, log, extra = LiveQueue(db, monkeypatch), [], []
+    _slow_images(llm, monkeypatch, log,
+                 lambda name: extra or extra.append(live.ask("scene_images", f"img-cena-{scene['id']}", "personagem sorrindo")))
+
+    assert run("regen_item", "scene_images", item_key=f"img-ambiente-{env['slug']}", comment="mais luz")["status"] == "succeeded"
+    assert db.jobs[extra[0]["id"]]["status"] == "succeeded"
+    assert [kind for kind, _ in log] == ["start", "end", "start", "end"], "a cena espera o ambiente dela ficar pronto"
 
 
 def test_unexpected_error_is_recorded_not_swallowed(world, monkeypatch):

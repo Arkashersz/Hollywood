@@ -163,6 +163,11 @@ footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wr
 .stagepanel { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 20px; display: flex; flex-direction: column; gap: 14px; }
 .panelhead { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
 .panelhead h4 { font-size: 17px; margin: 6px 0 4px; }
+.panelheadright { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.copybtn { white-space: nowrap; }
+.doctools { display: flex; justify-content: flex-end; padding: 8px 14px 0; border-top: 1px solid var(--line); }
+.doctools + .md { border-top: 0; }
+.mediacard details .copybtn, .lbside .copybtn { margin: 6px 0 4px; align-self: flex-start; }
 .muted { color: var(--muted); font-size: 13px; margin: 0; }
 .summary { font-size: 14px; color: var(--text-2); margin: 0; line-height: 1.55; }
 .callout { display: flex; gap: 10px; align-items: flex-start; border-radius: 12px; padding: 12px 14px; font-size: 13px; line-height: 1.5; }
@@ -202,6 +207,8 @@ footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wr
 .mediacard pre { white-space: pre-wrap; font-size: 11.5px; line-height: 1.55; color: var(--text-2); margin: 6px 0 0; max-height: 240px; overflow: auto; }
 .selbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 10px; font-size: 13px; }
 .mediacard.picked { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.mediacard.fixing { border-color: var(--accent); border-style: dashed; }
+.fixingtag { display: flex; align-items: center; gap: 7px; padding: 9px 12px; font-size: 12.5px; font-weight: 600; color: var(--accent); border-bottom: 1px solid var(--line); }
 .mediacard .pick { display: flex; align-items: center; gap: 8px; padding: 9px 12px; font-size: 12.5px; font-weight: 600; cursor: pointer; border-bottom: 1px solid var(--line); }
 .picknote { min-height: 38px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--bg); color: var(--text); padding: 0 11px; font-size: 13px; }
 .bulkbar { position: sticky; bottom: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-top: 12px; padding: 12px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface-2); }

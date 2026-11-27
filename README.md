@@ -111,6 +111,8 @@ Em todo roteiro (exceto "Cópia fiel", que mantém os do original e só avalia c
 
 Nas etapas de imagens e vídeos, cada item tem o botão **Ajustar**, com a etapa parada, em revisão ou já aprovada. Dá para editar o prompt do item e gerar só ele de novo (a etapa volta para a sua revisão). Quando uma etapa para porque um item não pôde ser criado, o painel mostra esse item com o prompt editável e **Salvar prompt e tentar de novo** continua dali, mantendo o que já saiu. Exige a migração `0009_adjust_item.sql`.
 
+**Vários ajustes ao mesmo tempo.** Enquanto um item é refeito (marcado como *Em ajuste* ou *Ajuste na fila*), dá para pedir o ajuste de outros itens da mesma etapa, cada um com a sua observação: o worker os gera juntos, até o limite de abas (`IMAGE_CONCURRENCY`, `VIDEO_CONCURRENCY`); o que passar disso espera uma aba livre. O mesmo item só aceita novo ajuste quando o anterior terminar. Um item que depende de outro em ajuste (cena do ambiente, clipe que continua do anterior) espera por ele. Se um falhar, os outros seguem. A aprovação da etapa volta quando todos terminam. Ajustes pedidos em outra etapa do mesmo projeto esperam na fila. Exige a migração `0021_parallel_adjust.sql`.
+
 **Vários de uma vez:** em **Selecionar vários para ajustar**, marque os itens errados, escreva o que corrigir (vale para todos) e, se quiser, uma observação específica em cada um; **Gerar N de novo** refaz só eles. Exige a migração `0012_adjust_items.sql`.
 
 ## Quando uma etapa para

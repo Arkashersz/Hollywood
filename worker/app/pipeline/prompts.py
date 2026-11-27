@@ -306,9 +306,22 @@ def sequel_characters(sequel: dict | None) -> str:
     if not sequel or not sequel.get("characters"):
         return ""
     return f"""
-Personagens da parte anterior (CONTINUAÇÃO): quem já existia mantém EXATAMENTE o mesmo nome, "fixed_description", "never_change_pt", expressões e voz (copie, não reescreva). Personagens novos só se o roteiro precisar.
+Personagens da parte anterior (CONTINUAÇÃO): quem já existia mantém EXATAMENTE o mesmo nome, "fixed_description", "never_change_pt", expressões e voz (copie, não reescreva), e a imagem dele é reaproveitada. Personagens novos só se o roteiro precisar.
+EXCEÇÃO · FIGURINO OU VISUAL NOVO: se o roteiro ou os ajustes do usuário pedem roupa, uniforme ou visual novo para um personagem que já existe, isso VALE acima da regra de copiar:
+- Se nesta parte o personagem aparece com o visual antigo em algumas cenas e com o novo em outras (ex.: flashback com a roupa de sempre, campeonato com o uniforme), mantenha a entrada original copiada e acrescente uma VARIANTE: uma entrada nova com nome "<Nome> · <figurino>" (ex.: "Kai · campeonato"), "variant_of": "<Nome>" e uma "fixed_description" completa com o MESMO rosto, corpo, cabelo, pele e marcas e o figurino novo descrito peça por peça, com cores exatas. A variante ganha folha própria e usa a mesma voz; nas cenas com o figurino novo, ela é quem aparece e fala.
+- Se o visual antigo não aparece mais nesta parte, mantenha o nome, ponha "new_look": true e reescreva "fixed_description", "never_change_pt" e "details" com o visual novo (mesmo rosto, corpo e voz). A folha é gerada de novo.
+- Não use variante nem "new_look" em quem não muda de visual.
 {data('personagens-anteriores', json.dumps(sequel['characters'], ensure_ascii=False, indent=1))}
 """
+
+
+def variants_note(bible: dict) -> str:
+    """Variantes de figurino (ex.: "Kai · campeonato"): cada cena usa a versão do personagem com o figurino que o roteiro indica."""
+    pairs = [f'"{c["name"]}" (variante de "{c["variant_of"]}")' for c in bible.get("characters") or [] if c.get("variant_of")]
+    if not pairs:
+        return ""
+    return ("\nVariantes de figurino: " + ", ".join(pairs) + ". São a mesma pessoa com outra roupa: nas cenas em que o roteiro indica o figurino novo, "
+            "use o nome da variante (em cenas, falas e referências); nas demais, o nome original. Nunca os dois juntos na mesma cena.")
 
 
 def sequel_brief(sequel: dict, previous: str | None, feedback: str | None) -> str:
@@ -504,7 +517,7 @@ TAREFA: você é o DESIGNER. Planeje os ambientes e a imagem inicial de cada cen
 
 {data('estilo-global', bible['style_block'])}
 {dossier_block(clone, doc01_md)}
-Personagens já aprovados (use estes nomes exatamente): {json.dumps(names, ensure_ascii=False)}
+Personagens já aprovados (use estes nomes exatamente): {json.dumps(names, ensure_ascii=False)}{variants_note(bible)}
 
 Devolva este objeto:
 {{
@@ -549,7 +562,7 @@ TAREFA: você é o EDITOR. Escreva os prompts de vídeo (image-to-video) de cada
 {dossier_block(clone, doc01_md)}
 {"Em cada prompt de clipe aplique o ANIMATION AND CAMERA BLOCK do dossiê (15.8): mesmo movimento, mesma câmera, mesmas expressões e mesma atuação do original." if clone and doc01_md and clone_dossier(doc01_md) else ""}
 Cenas com imagem-base aprovada: {json.dumps(scenes, ensure_ascii=False)}
-Personagens (use estes nomes exatamente em "dialogue"."speaker"): {json.dumps(names, ensure_ascii=False)}
+Personagens (use estes nomes exatamente em "dialogue"."speaker"): {json.dumps(names, ensure_ascii=False)}{variants_note(bible)}
 Imagens aprovadas que podem ser anexadas ao clipe (use os ids exatamente em "reference_images"): {json.dumps({k: v["label"] for k, v in (catalog or {}).items()}, ensure_ascii=False)}
 
 Devolva este objeto:

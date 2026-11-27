@@ -83,6 +83,7 @@ class FakeSupabase:
         ]
         self.media = {"worker_id": "home-pc-01", "local_url": "http://127.0.0.1:8765", "public_url": "https://rapid-fox.trycloudflare.com", "token": "SENHA-DO-ESTUDIO"}
         self.heartbeat_age = 0
+        self.jobs: list[dict] = []
         self.events = [{"id": 1, "project_id": self.project["id"], "stage_key": "character_images", "level": "info", "message": "Gerado: Anna · corpo inteiro.", "created_at": NOW},
                        {"id": 2, "project_id": self.project["id"], "stage_key": "character_images", "level": "warn", "message": "Parado (LIMIT_REACHED): limite.", "created_at": NOW}]
         buffer = io.BytesIO()
@@ -117,7 +118,7 @@ class FakeSupabase:
             query = parse_qs(url.query)
             if table == "worker_media":
                 return await reply([self.media] if self.media else [])
-            rows = {"projects": [self.project], "project_stages": self.stages, "artifacts": self.artifacts, "events": self.events,
+            rows = {"jobs": self.jobs, "projects": [self.project], "project_stages": self.stages, "artifacts": self.artifacts, "events": self.events,
                     "worker_heartbeats": [{"worker_id": "home-pc-01", "hostname": "CASA", "status": "online", "last_seen_at": datetime.fromtimestamp(time.time() - self.heartbeat_age, timezone.utc).isoformat(),
                                            "details": {"job": {"stage_key": "character_images"}}}]}.get(table, [])
             if "project_id" in query:
@@ -330,6 +331,46 @@ def test_gallery_lightbox_navigates_and_shows_overview(panel):
         assert await dialog.count() == 0
         return await page.title()
     assert drive(panel, scenario).startswith("(1)")
+
+
+def test_copy_stage_puts_everything_of_the_stage_on_the_clipboard(panel):
+    async def scenario(page, fake):
+        await page.get_by_role("heading", name="Anna und der Hund").wait_for()
+        await page.evaluate("""() => Object.defineProperty(navigator, 'clipboard', { configurable: true,
+            value: { writeText: async (t) => { window.__copied = [...(window.__copied || []), t]; } } })""")
+        await page.get_by_role("button", name="Copiar etapa").click()
+        await page.get_by_role("button", name="Copiado").wait_for()
+        await shot(page, "copiar-etapa")
+        await page.locator(".stage").nth(2).click()
+        await page.locator(".stagepanel summary", has_text="Documentos").click()
+        await page.locator(".doc > summary", has_text="Documento 04 · Personagens").click()
+        await page.get_by_role("button", name="Copiar documento").click()
+        return await page.evaluate("window.__copied")
+    stage, doc = drive(panel, scenario)
+    assert stage.startswith("# Anna und der Hund · Etapa 04 · Etapa character_images")
+    for part in ("## Resumo", "2 imagem(ns) de corpo inteiro.", "- Aviso de teste.", "## Prompts (2)", "### Anna · corpo inteiro · imagens/personagens/personagem-anna-corpo.png", "Stylized 3D cartoon render."):
+        assert part in stage, part
+    assert doc == DOC
+
+
+def test_other_items_can_be_adjusted_while_one_is_still_running(panel):
+    async def scenario(page, fake):
+        fake.stages[3].update(status="in_progress", payload={"progress": {"done": 0, "total": 1, "label": "Ajustando Anna · corpo inteiro…"}})
+        fake.jobs = [{"id": "j1", "stage_id": "stage-4", "job_type": "regen_item", "status": "running", "input": {"item_key": "img-personagem-anna-corpo"}}]
+        await page.reload()
+        await page.get_by_role("heading", name="Anna und der Hund").wait_for()
+        await page.get_by_text("1 item em ajuste").wait_for()
+        anna, hund = (page.locator(".mediacard", has_text=f"{n} · corpo inteiro") for n in ("Anna", "Hund"))
+        await anna.get_by_text("Em ajuste").wait_for()
+        assert await anna.get_by_role("button", name="Ajustar").count() == 0, "o item em ajuste não aceita outro pedido"
+        await hund.get_by_role("button", name="Ajustar").click()
+        await hund.get_by_placeholder("O que ajustar (opcional)").fill("pelo mais claro")
+        await shot(page, "ajuste-simultaneo")
+        await hund.get_by_role("button", name="Gerar de novo").click()
+        await page.get_by_text("Ajuste enfileirado: Hund · corpo inteiro.").wait_for()
+        return fake.rpc_calls
+    calls = drive(panel, scenario)
+    assert calls == [("adjust_item", {"p_stage_id": "stage-4", "p_item_key": "img-personagem-hund-corpo", "p_prompt": None, "p_comment": "pelo mais claro"})]
 
 
 def test_completed_project_offers_part_two_with_or_without_a_link(panel):

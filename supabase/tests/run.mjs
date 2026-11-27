@@ -285,6 +285,36 @@ assert.equal(jb.input.item_key, 'img-cena-a');
 assert.equal(jb.input.comment, 'mais claro');
 step('adjust_item: etapa parada refaz o item e segue; etapa aprovada refaz só o item; só o dono');
 
+// --- ajustar outro item enquanto um ajuste ainda roda ----------------------------
+const activeJobs = async () => { await as(null, 'service_role'); const rows = await q(`select * from jobs where stage_id=$1 and status in ('queued','running') order by created_at`, [gs.id]); await as(A); return rows; };
+await as(A);
+// o ajuste de img-cena-a (acima) continua na fila
+await fails(`select adjust_item($1,'img-cena-a',null,'de novo')`, [gs.id], /Já há um ajuste em andamento para: img-cena-a/);
+[adj] = await q(`select * from adjust_item($1,'img-cena-b','prompt b','casaco azul')`, [gs.id]);
+assert.equal(adj.status, 'queued');
+let live = await activeJobs();
+assert.deepEqual(live.map((j) => j.input.item_key), ['img-cena-a', 'img-cena-b']);
+assert.equal(live[1].input.prompt, 'prompt b', 'o prompt editado vai na própria tarefa');
+await as(null, 'service_role');
+await db.query(`update jobs set status='running' where stage_id=$1 and status='queued'`, [gs.id]);
+await db.query(`update project_stages set status='in_progress' where id=$1`, [gs.id]);
+await as(A);
+await fails(`select adjust_items($1, '[{"key":"img-cena-c"},{"key":"img-cena-b"}]'::jsonb)`, [gs.id], /Já há um ajuste em andamento para: img-cena-b/);
+[adj] = await q(`select * from adjust_items($1, '[{"key":"img-cena-c","comment":"x"},{"key":"img-cena-d"}]'::jsonb)`, [gs.id]);
+assert.equal(adj.status, 'in_progress', 'a etapa que o worker já está processando não volta para a fila');
+await fails(`select adjust_item($1,'img-cena-d')`, [gs.id], /Já há um ajuste em andamento para: img-cena-d/);
+await fails(`select decide_stage($1,'approve')`, [gs.id], /not awaiting review/);
+await fails(`select studio_check_adjust((select s from project_stages s where s.id=$1), array['x'])`, [gs.id], /permission denied/);
+await as(B);
+await fails(`select adjust_item($1,'img-cena-e')`, [gs.id], /Stage not found/);
+// enquanto a etapa inteira está sendo gerada, não entra ajuste
+await as(null, 'service_role');
+await db.query(`update jobs set status='succeeded' where stage_id=$1`, [gs.id]);
+await db.query(`insert into jobs(project_id, stage_id, job_type, input) values ($1,$2,'run_stage','{}'::jsonb)`, [ap.id, gs.id]);
+await as(A);
+await fails(`select adjust_item($1,'img-cena-e')`, [gs.id], /não pode ser ajustada agora/);
+step('adjust: outros itens entram enquanto um ajuste roda; o mesmo item não; geração completa continua bloqueando');
+
 // --- voltar para uma etapa anterior ---------------------------------------------
 await as(A);
 const [rp] = await q(`select * from create_project_from_plan('Voltar', null, $1::jsonb)`, [JSON.stringify({ scene_images: [{ name: 'a', prompt: 'p' }] })]);

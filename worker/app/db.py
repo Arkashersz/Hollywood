@@ -39,6 +39,12 @@ class Db:
         rows = self.client.rpc("claim_next_job", {"p_worker_id": config.WORKER_ID}).execute().data or []
         return rows[0] if rows else None
 
+    def claim_regen_jobs(self, stage_id: str) -> list[dict]:
+        """Ajustes novos pedidos enquanto a etapa já está sendo ajustada: entram na mesma execução."""
+        res = (self.client.table("jobs").update({"status": "running", "worker_id": config.WORKER_ID, "started_at": now()})
+               .eq("stage_id", stage_id).eq("job_type", "regen_item").eq("status", "queued").execute())
+        return sorted(res.data or [], key=lambda job: str(job.get("created_at") or ""))
+
     def release_job(self, job_id: str) -> None:
         """Devolve uma tarefa reivindicada à fila (ex.: o mesmo projeto já está sendo processado)."""
         self.client.table("jobs").update({"status": "queued", "worker_id": None, "started_at": None}).eq("id", job_id).execute()

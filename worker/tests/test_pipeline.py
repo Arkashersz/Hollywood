@@ -672,6 +672,42 @@ def test_returning_characters_keep_their_exact_look_and_new_ones_are_created(pro
     assert core.adopt_plan(plan, child.sequel) == [] and not plan["environments"][0]["reused"]
 
 
+def test_sequel_accepts_a_new_outfit_for_an_existing_character_instead_of_copying_the_old_one(project):
+    parent, llm, _, _ = project
+    run_until(parent, "scene_images")
+    child, _ = _child(project, parent)
+    run(child, "analysis"); run(child, "script"); run(child, "character_bible")
+    assert child.load_data("bible")["characters"][0]["reused"], "sem pedido, o personagem volta igual"
+    run(child, "character_images")
+    old_body = (child.dir / "imagens/personagens/personagem-anna-corpo.png").read_bytes()
+
+    changed = json.loads(json.dumps(BIBLE))
+    anna = changed["characters"][0]
+    anna.update(new_look=True, fixed_description="A 30-year-old woman, purple dance competition costume with gold embroidery.")
+    gala = {**json.loads(json.dumps(anna)), "name": "Anna · Gala", "variant_of": "Anna", "new_look": False,
+            "fixed_description": "A 30-year-old woman, long silver gala dress.", "voice": {"descriptor_en": "Some other voice."}}
+    changed["characters"].insert(1, gala)
+    llm.json_script = {"CINEGRAFISTA": [as_json(changed)]}
+    run(child, "character_bible", feedback="Anna precisa de roupa nova para o campeonato")
+    prompt = next(a["prompt"] for a in reversed(llm.asks) if "CINEGRAFISTA" in a["prompt"])
+    assert "EXCEÇÃO · FIGURINO OU VISUAL NOVO" in prompt and "Anna precisa de roupa nova" in prompt
+    bible = child.load_data("bible")
+    anna, gala = bible["characters"][0], bible["characters"][1]
+    assert "purple dance competition costume" in anna["fixed_description"] and not anna["reused"], "o visual novo não é sobrescrito pelo antigo"
+    assert gala["variant_of"] == "Anna" and gala["voice"] == anna["voice"] and not gala["reused"], "a variante usa a mesma voz"
+    assert child.is_stale("img-personagem-anna-corpo")
+    assert "Variante de figurino de Anna" in child.read_doc("04") and "Visual novo nesta parte" in child.read_doc("04")
+
+    before = len(llm.images)
+    run(child, "character_images")
+    made = {i["out"]: i["prompt"] for i in llm.images[before:]}
+    assert "purple dance competition costume" in made["personagem-anna-corpo.png"] and "silver gala dress" in made["personagem-anna-gala-corpo.png"]
+    assert (child.dir / "imagens/personagens/personagem-anna-corpo.png").read_bytes() != old_body
+    run(child, "character_sheets")
+    run(child, "visual_plan")
+    assert '"Anna · Gala" (variante de "Anna")' in llm.asks[-1]["prompt"]
+
+
 def test_hook_ending_and_consistency_rules_reach_the_script_bible_and_clip_prompts(project):
     ctx, llm, _, _ = project
     run_until(ctx, "video_prompts")

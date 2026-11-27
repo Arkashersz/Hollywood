@@ -81,6 +81,8 @@ class Ctx:
     whisper_model: str = "small"
     language: str | None = None
     pause: Callable | None = None   # espera entre gerações (injetável nos testes)
+    last_start: float = 0.0         # quando começou a última geração (vale para todos os pedidos que usam este contexto)
+    on_progress: Callable | None = None   # (item, terminou) · vários ajustes ao mesmo tempo somam um progresso só
     image_slots: object = None      # abas do ChatGPT compartilhadas entre os projetos em andamento (asyncio.Queue de números)
     video_slots: object = None
     image_concurrency: int = 1      # imagens geradas ao mesmo tempo (uma aba por item)
@@ -203,6 +205,8 @@ def carry_changes(new: dict, old: dict | None, key: str) -> None:
         return
     before = {str(x["name"]).casefold(): x.get("approved_changes") for x in old.get(key) or [] if x.get("approved_changes")}
     for entry in new.get(key) or []:
+        if entry.get("new_look"):   # os ajustes eram do visual antigo
+            continue
         kept = before.get(str(entry["name"]).casefold())
         if kept:
             entry["approved_changes"] = list(kept)
@@ -276,13 +280,26 @@ def adopt_bible(bible: dict, sequel: dict | None) -> list[str]:
     if not sequel:
         return []
     known = {str(c["name"]).casefold(): c for c in sequel.get("characters") or []}
+    current = {c["name"].casefold(): c for c in bible["characters"]}
     if sequel.get("style_block"):
         bible["style_block"] = sequel["style_block"]
     names = []
     for c in bible["characters"]:
         old = known.get(c["name"].casefold())
         c["reused"] = False
+        base = c.get("variant_of")
+        if base:   # figurino novo de alguém que já existe: mesma pessoa e mesma voz, com folha própria
+            origin = known.get(base.casefold()) or current.get(base.casefold())
+            if origin is None or origin is c:
+                c["variant_of"] = ""
+            else:
+                c["variant_of"] = origin["name"]
+                c["voice"] = origin["voice"]
+                continue
         if old is None:
+            continue
+        if c.get("new_look"):   # pedido explícito de visual novo: a descrição nova vale e a folha é gerada de novo
+            c["slug"], c["voice"] = old["slug"], old["voice"]
             continue
         for key in ("slug", "fixed_description", "voice_only", "never_change_pt", "expressions", "details", "voice"):
             c[key] = old[key]
@@ -400,6 +417,7 @@ def validate_bible(raw: dict) -> dict:
             "name": name, "slug": _unique_slug(name, used), "role_pt": _text(c, "role_pt", where, required=False),
             "fixed_description": fixed, "voice_only": fixed.strip().lower().rstrip(".") == "voice only",
             "never_change_pt": _strings(c, "never_change_pt"), "expressions": _strings(c, "expressions"), "details": _strings(c, "details"),
+            "variant_of": _text(c, "variant_of", where, required=False), "new_look": c.get("new_look") is True,
             "voice": {
                 "profile_pt": _text(voice, "profile_pt", where + ".voice", required=False),
                 "descriptor_en": _text(voice, "descriptor_en", where + ".voice"),

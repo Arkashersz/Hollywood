@@ -259,9 +259,23 @@ async def character_bible(ctx: Ctx) -> dict:
     reused = adopt_bible(bible, ctx.sequel)
     if reused:
         ctx.log(f"Já existem e voltam idênticos (sem gerar de novo): {', '.join(reused)}.")
+    looks = [c["name"] for c in bible["characters"] if c.get("variant_of") or c.get("new_look")]
+    if looks:
+        ctx.log(f"Visual novo nesta parte (folha gerada de novo): {', '.join(looks)}.")
+    before: dict[str, str] = {}
     if ctx.data_path("bible").is_file():   # refazer o texto não apaga o que o usuário já ajustou nas imagens
-        carry_changes(bible, ctx.load_data("bible"), "characters")
+        old = ctx.load_data("bible")
+        carry_changes(bible, old, "characters")
+        before = {c["slug"]: render.current_look(c) for c in render.visible(old)}
     ctx.save_data("bible", bible)
+    # Quem mudou de aparência numa revisão (figurino novo, por exemplo) tem a folha refeita, e o que foi feito a partir dela também.
+    changed = {c["slug"] for c in render.visible(bible) if not c.get("reused") and c["slug"] in before and before[c["slug"]] != render.current_look(c)}
+    if changed:
+        redo = [i for key in ("character_images", "character_sheets") for i in items_for(ctx, key)
+                if i.key in {f"img-folha-{s}" for s in changed} | {f"img-personagem-{s}-corpo" for s in changed}]
+        for item in redo:
+            ctx.mark_stale(item.key, "visual novo na descrição do personagem")
+        _stale_dependents(ctx, redo)
     ctx.write_doc("04", render.doc04(bible, ctx.direct_sheets))
     ctx.write_doc("05", render.doc05(bible, ctx.direct_sheets))
     ctx.write_doc("06", render.doc06(bible))
@@ -307,7 +321,7 @@ async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note
     if shared is None:
         for n in range(width):
             slots.put_nowait(n)
-    state = {"error": None, "last_start": 0.0}
+    state = {"error": None}
     loop = asyncio.get_event_loop()
 
     async def one(item: Item) -> None:
@@ -316,10 +330,13 @@ async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note
         try:
             if state["error"] is not None:   # outro item já parou o lote: não começa mais nada
                 return
-            if ctx.pause and state["last_start"]:   # intervalo entre inícios, para não disparar tudo de uma vez
+            if ctx.pause and ctx.last_start:   # intervalo entre inícios, para não disparar tudo de uma vez
                 await ctx.pause()
-            state["last_start"] = loop.time()
-            ctx.sink.progress(ctx.stage_key, finished, total, f"Gerando {item.name}…")
+            ctx.last_start = loop.time()
+            if ctx.on_progress:
+                ctx.on_progress(item, False)
+            else:
+                ctx.sink.progress(ctx.stage_key, finished, total, f"Gerando {item.name}…")
             item_note = (targets.get(item.key) if targets is not None else note) or None
             # Ajuste = editar a imagem que está aprovada hoje (ela vai como 1ª referência) e manter todos os ajustes anteriores.
             # Item desatualizado (a imagem da qual ele depende mudou) é refeito a partir das referências novas.
@@ -342,6 +359,8 @@ async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note
             ctx.log(f"Gerado: {item.name}.")
             made += 1
             finished += 1
+            if ctx.on_progress:
+                ctx.on_progress(item, True)
         except Exception as exc:  # noqa: BLE001 - guarda o primeiro erro; os itens já em andamento terminam sozinhos
             exc = _explain_browser_error(exc)
             if state["error"] is None:
@@ -357,7 +376,8 @@ async def generate(ctx: Ctx, items: list[Item], *, only: str | None = None, note
         await asyncio.gather(*(one(i) for i in group))
         if state["error"] is not None:
             raise state["error"]
-    ctx.sink.progress(ctx.stage_key, total, total, "Concluído")
+    if not ctx.on_progress:
+        ctx.sink.progress(ctx.stage_key, total, total, "Concluído")
     return {"made": made, "kept": kept}
 
 
@@ -684,6 +704,36 @@ async def run_stage(ctx: Ctx) -> dict:
     if handler is None:
         raise ValueError(f"Etapa desconhecida: {ctx.stage_key}")
     return await handler(ctx)
+
+
+def related_items(ctx: Ctx, new: set[str], busy: set[str]) -> bool:
+    """Os ajustes `new` precisam esperar os `busy`? Sim quando um usa o resultado do outro (cena e o ambiente dela, clipe que
+    continua do anterior): rodando juntos, o dependente sairia com a versão antiga."""
+    if new & busy:
+        return True
+    if ctx.stage_key == "production":
+        try:
+            chained = {f"vid-clipe-{c['n']:02d}": f"vid-clipe-{c['n'] - 1:02d}"
+                       for c in ctx.load_data("clips")["clips"] if c["start"] == "previous_last_frame"}
+        except Exception:  # noqa: BLE001 - prompts prontos: não há encadeamento descrito
+            return False
+
+        def ancestors(key: str) -> set[str]:
+            found = set()
+            while key in chained:
+                key = chained[key]
+                found.add(key)
+            return found
+        return any(a in ancestors(b) or b in ancestors(a) for a in new for b in busy)
+    items = {i.key: i for i in items_for(ctx, ctx.stage_key)}
+
+    def refs(key: str) -> set[Path]:
+        try:
+            return {Path(r).resolve() for r in items[key].refs()}
+        except Exception:  # noqa: BLE001 - referência ainda inexistente
+            return set()
+    return any(items[b].path.resolve() in refs(a) or items[a].path.resolve() in refs(b)
+               for a in new if a in items for b in busy if b in items)
 
 
 async def regen_item(ctx: Ctx, item_key: str, comment: str | None) -> dict:

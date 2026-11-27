@@ -52,6 +52,164 @@ def factory_context(db, project: dict) -> tuple[dict | None, int | None]:
     return profile, int(chosen) if chosen else None
 
 
+def describe_failure(ctx: Ctx, exc: Exception) -> tuple[str, dict]:
+    """Desfecho de uma falha: o status da tarefa e o erro mostrado no painel (também registrado na atividade)."""
+    if isinstance(exc, Blocked):
+        ctx.log(f"Parado ({exc.code}): {exc.message} {exc.action}", "warn")
+        return "blocked", exc.as_dict()
+    traceback.print_exception(type(exc), exc, exc.__traceback__)
+    error = {"code": "HANDLER_ERROR", "message": f"{type(exc).__name__}: {exc}"[:600], "blocked": False,
+             "action": "Veja o terminal do worker para o detalhe e clique em Tentar novamente."}
+    if getattr(exc, "item", None):
+        error["item"] = exc.item
+    ctx.log(f"Falha na etapa: {error['message']}", "error")
+    return "failed", error
+
+
+RETRY_WAIT_S = 2.0
+
+
+async def persist(action, attempts: int = 5) -> None:
+    """Grava um desfecho insistindo: se a rede piscar, a tarefa não pode ficar presa em andamento (o item não aceitaria novo ajuste)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            action()
+            return
+        except Exception as exc:  # noqa: BLE001
+            if attempt == attempts:
+                print(f"Não consegui gravar no Supabase: {exc}. Reinicie o worker se um item ficar preso em ajuste.", flush=True)
+                return
+            await asyncio.sleep(RETRY_WAIT_S * attempt)
+
+
+def adjust_targets(job: dict) -> dict[str, str | None]:
+    inp = job.get("input") or {}
+    if inp.get("items"):
+        return {str(i.get("item_key", "")): i.get("comment") for i in inp["items"]}
+    return {str(inp.get("item_key", "")): inp.get("comment")}
+
+
+async def adjust_session(db: Db, first: dict, stage: dict, ctx: Ctx) -> None:
+    """Ajustes de uma etapa. Enquanto roda, os pedidos novos do painel entram junto e são gerados ao mesmo tempo, dividindo as
+    mesmas abas. Um único contexto para todos (os registros em disco não se atropelam); cada pedido tem o seu desfecho, e a
+    falha de um não derruba os outros. A etapa volta para revisão quando não sobra nenhum."""
+    for attr, width in (("image_slots", ctx.image_concurrency), ("video_slots", ctx.video_concurrency)):
+        if getattr(ctx, attr) is None:   # sem abas compartilhadas entre projetos: os pedidos desta etapa dividem estas
+            slots: asyncio.Queue[int] = asyncio.Queue()
+            for n in range(max(1, width)):
+                slots.put_nowait(n)
+            setattr(ctx, attr, slots)
+    claim_more = getattr(db, "claim_regen_jobs", None)
+    waiting: list[dict] = [first]
+    running: dict[asyncio.Task, tuple[dict, set[str]]] = {}
+    total: set[str] = set()
+    done: set[str] = set()
+    failures: list[dict] = []
+    warnings: list[str] = []
+
+    def report(item, finished: bool) -> None:
+        if finished:
+            done.add(item.key)
+        label = f"Ajustando · pronto: {item.name}" if finished else f"Ajustando {item.name}…"
+        ctx.sink.progress(ctx.stage_key, len(done), len(total), label)
+
+    ctx.on_progress = report
+
+    def absorb() -> None:
+        if claim_more is None:
+            return
+        try:
+            fresh = claim_more(stage["id"])
+        except Exception as exc:  # noqa: BLE001 - rede instável: tenta de novo na próxima volta
+            print(f"Não consegui buscar novos ajustes: {exc}", flush=True)
+            return
+        waiting.extend(fresh)
+
+    def accept(job: dict) -> None:
+        """Prompt editado no painel para este pedido (vem na própria tarefa)."""
+        inp = job.get("input") or {}
+        if inp.get("prompt") and inp.get("item_key"):
+            ctx.overrides[inp["item_key"]] = inp["prompt"]
+
+    def start_ready() -> None:
+        busy = {k for _, keys in running.values() for k in keys}
+        for job in list(waiting):
+            keys = set(adjust_targets(job))
+            try:
+                accept(job)
+                blocked = bool(busy) and stages.related_items(ctx, keys, busy)
+            except Exception:  # noqa: BLE001 - dados ausentes: o próprio ajuste explica o erro
+                blocked = False
+            busy |= keys   # quem veio depois e depende deste também espera
+            if blocked:
+                continue
+            waiting.remove(job)
+            total.update(keys)
+            running[asyncio.create_task(stages.regen_items(ctx, adjust_targets(job)))] = (job, keys)
+
+    def collect(task: asyncio.Task, job: dict) -> tuple[str, dict]:
+        try:
+            warnings.extend(task.result().get("warnings") or [])
+            return "succeeded", {}
+        except Exception as exc:  # noqa: BLE001
+            status, error = describe_failure(ctx, exc)
+            failures.append(error)
+            return status, error
+
+    def finish(job: dict, status: str, error: dict) -> None:
+        if status == "succeeded":
+            db.finish_job(job["id"], status, output={"stage_key": stage["stage_key"]})
+        else:
+            db.finish_job(job["id"], status, error_code=error["code"], error_message=error["message"])
+
+    def to_review() -> None:
+        """A etapa volta para revisão: um ajuste que falhou não invalida o restante, só aparece como aviso."""
+        payload = db.stage(stage["id"]).get("payload") or {}
+        # Avisos de "desatualizado" são refeitos a cada ajuste; os demais avisos da etapa ficam como estavam.
+        kept = [w for w in (stage.get("payload") or {}).get("warnings") or [] if not str(w).startswith(stages.STALE_PREFIX)]
+        notes = list(dict.fromkeys(kept + warnings))
+        patch: dict = {}
+        if notes:
+            patch["warnings"] = notes
+        if failures:
+            error = dict(failures[0])
+            others = [f.get("item", {}).get("name") or f["code"] for f in failures[1:]]
+            if others:
+                error["message"] = f"{error['message']} Também falharam: {', '.join(others)}."
+            patch["error"] = error
+        if ctx.overrides:   # o progresso gravado durante a execução não pode apagar um prompt editado no meio dela
+            patch["prompt_overrides"] = {**(payload.get("prompt_overrides") or {}), **ctx.overrides}
+        db.update_stage(stage["id"], status="pending_review", remove=("progress",) + (() if notes else ("warnings",)), patch=patch or None)
+
+    finished: list[tuple[dict, str, dict]] = []
+    while True:
+        absorb()
+        start_ready()
+        for job, status, error in finished:
+            await persist(lambda: finish(job, status, error))
+        finished = []
+        if running:
+            ready, _ = await asyncio.wait(list(running), timeout=min(config.POLL_SECONDS, 3), return_when=asyncio.FIRST_COMPLETED)
+            for task in ready:
+                job, _ = running.pop(task)
+                status, error = collect(task, job)
+                finished.append((job, status, error))
+            if running or waiting:
+                continue
+        # Nada rodando: devolve a etapa antes de encerrar as últimas tarefas e confere de novo, para não perder um pedido
+        # que chegou neste instante (ele reabre a etapa e entra nesta mesma execução).
+        absorb()
+        if not waiting:
+            await persist(to_review)
+            absorb()
+        for job, status, error in finished:
+            await persist(lambda: finish(job, status, error))
+        finished = []
+        if not waiting:
+            return
+        await persist(lambda: db.update_stage(stage["id"], status="in_progress"))
+
+
 async def process(db: Db, job: dict, brain_for, images, video, pools: dict | None = None) -> None:
     """Executa uma tarefa e grava o desfecho. Nunca aprova nada: a etapa termina em revisão."""
     kind, inp = job.get("job_type"), job.get("input") or {}
@@ -92,39 +250,20 @@ async def process(db: Db, job: dict, brain_for, images, video, pools: dict | Non
               language=config.REFERENCE_LANGUAGE, plan=project.get("import_plan"), clone=project.get("mode") == "clone", story=story_of(project), direct_sheets=has_no_body_stage(db, project), image_concurrency=config.IMAGE_CONCURRENCY, video_concurrency=config.VIDEO_CONCURRENCY,
               image_slots=(pools or {}).get("image"), video_slots=(pools or {}).get("video"), pilot_approved=bool((stage.get("payload") or {}).get("pilot_approved")),
               overrides=dict((stage.get("payload") or {}).get("prompt_overrides") or {}), force=set(inp.get("force_items") or []), pause=lambda: asyncio.sleep(config.PAUSE_BETWEEN_ITEMS))
-    regen = kind == "regen_item"
     db.update_stage(stage["id"], status="in_progress", remove=("error", "progress"))
+    if kind == "regen_item":
+        await adjust_session(db, job, stage, ctx)
+        return
     try:
-        if regen:
-            if inp.get("items"):
-                result = await stages.regen_items(ctx, {str(i.get("item_key", "")): i.get("comment") for i in inp["items"]})
-            else:
-                result = await stages.regen_item(ctx, inp.get("item_key", ""), inp.get("comment"))
-            # Avisos de "desatualizado" são refeitos a cada ajuste; os demais avisos da etapa ficam como estavam.
-            kept = [w for w in (stage.get("payload") or {}).get("warnings") or [] if not str(w).startswith(stages.STALE_PREFIX)]
-            warnings = kept + list(result.get("warnings") or [])
-            db.update_stage(stage["id"], status="pending_review", remove=("progress",) + (() if warnings else ("warnings",)),
-                            patch={"warnings": warnings} if warnings else None)
-        else:
-            result = await stages.run_stage(ctx)
-            db.update_stage(stage["id"], status="pending_review", submitted_at=now(), remove=("progress", "next_generation", "warnings", "pilot", "pilot_remaining", "chosen", "proposals", "recommended"),
-                            patch={"local_dir": str(project_dir), **result})
-            ctx.log(f"Etapa pronta para revisão. {result.get('summary', '')}")
+        result = await stages.run_stage(ctx)
+        db.update_stage(stage["id"], status="pending_review", submitted_at=now(), remove=("progress", "next_generation", "warnings", "pilot", "pilot_remaining", "chosen", "proposals", "recommended"),
+                        patch={"local_dir": str(project_dir), **result})
+        ctx.log(f"Etapa pronta para revisão. {result.get('summary', '')}")
         db.finish_job(job["id"], "succeeded", output={"stage_key": stage["stage_key"]})
-    except Blocked as exc:
-        # Regenerar um item não invalida o restante: a etapa volta para revisão com o aviso.
-        db.update_stage(stage["id"], status="pending_review" if regen else "failed", remove=("progress",), patch={"error": exc.as_dict()})
-        db.finish_job(job["id"], "blocked", error_code=exc.code, error_message=exc.message)
-        ctx.log(f"Parado ({exc.code}): {exc.message} {exc.action}", "warn")
     except Exception as exc:  # noqa: BLE001 - qualquer falha fica registrada com etapa e ação recomendada
-        traceback.print_exc()
-        error = {"code": "HANDLER_ERROR", "message": f"{type(exc).__name__}: {exc}"[:600], "blocked": False,
-                 "action": "Veja o terminal do worker para o detalhe e clique em Tentar novamente."}
-        if getattr(exc, "item", None):
-            error["item"] = exc.item
-        db.update_stage(stage["id"], status="pending_review" if regen else "failed", remove=("progress",), patch={"error": error})
-        db.finish_job(job["id"], "failed", error_code="HANDLER_ERROR", error_message=error["message"])
-        ctx.log(f"Falha na etapa: {error['message']}", "error")
+        status, error = describe_failure(ctx, exc)
+        db.update_stage(stage["id"], status="failed", remove=("progress",), patch={"error": error})
+        db.finish_job(job["id"], status, error_code=error["code"], error_message=error["message"])
 
 
 async def heartbeat(db: Db, state: dict, media: tunnel.RemoteMedia | None = None) -> None:

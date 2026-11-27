@@ -2,11 +2,11 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import {
   Activity, AlertTriangle, Check, ChevronRight, Clapperboard, Cloud, Film, FolderOpen, Link2, LogOut, MessageSquareWarning,
-  Bell, ChevronDown, ChevronLeft, Clock, Download, Monitor, Plus, SkipForward, X, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles, Trash2,
+  Bell, ChevronDown, ChevronLeft, Clock, Copy, Download, Monitor, Plus, SkipForward, X, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles, Trash2,
 } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { buildPlan, type PlanKey } from './importPlan';
-import { AGENT_LABEL, FALLBACK_ICON, STAGE_META, STATUS_LABEL, timeAgo, type Artifact, type EventRow, type Heartbeat, type MediaAccess, type Project, type Stage } from './types';
+import { AGENT_LABEL, FALLBACK_ICON, STAGE_META, STATUS_LABEL, timeAgo, type ActiveJob, type Artifact, type EventRow, type Heartbeat, type MediaAccess, type Project, type Stage } from './types';
 
 type View = 'projects' | 'activity' | 'integrations';
 const BUCKET = 'artifacts';
@@ -30,6 +30,7 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
   const [stages, setStages] = useState<Stage[]>([]);
   const [allStages, setAllStages] = useState<Stage[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [jobs, setJobs] = useState<ActiveJob[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [heartbeat, setHeartbeat] = useState<Heartbeat | null>(null);
   const [media, setMedia] = useState<MediaAccess | null>(null);
@@ -59,19 +60,21 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
 
     const eventsQuery = db.from('events').select('*').order('created_at', { ascending: false }).limit(80);
     if (!current) {
-      setStages([]); setArtifacts([]);
+      setStages([]); setArtifacts([]); setJobs([]);
       setEvents(((await eventsQuery).data ?? []) as EventRow[]);
       return;
     }
-    const [s, a, e] = await Promise.all([
+    const [s, a, e, j] = await Promise.all([
       db.from('project_stages').select('*').eq('project_id', current).order('stage_order'),
       db.from('artifacts').select('*').eq('project_id', current).order('name'),
       eventsQuery,
+      db.from('jobs').select('id,stage_id,job_type,status,input').eq('project_id', current).in('status', ['queued', 'running']),
     ]);
     if (selectedRef.current && selectedRef.current !== current) return; // o usuário trocou de projeto enquanto carregava
     setStages((s.data ?? []) as Stage[]);
     setArtifacts((a.data ?? []) as Artifact[]);
     setEvents((e.data ?? []) as EventRow[]);
+    setJobs((j.data ?? []) as ActiveJob[]);
   }, [db]);
 
   // Tempo real, com atualização periódica como reserva (redes que bloqueiam WebSocket).
@@ -186,7 +189,7 @@ export function Studio({ db, session }: { db: SupabaseClient; session: Session }
         <section className="content">
           {notice && <div className="notice" role="status"><Sparkles size={17} /><span>{notice}</span><button className="linkbtn" onClick={() => setNotice('')}>fechar</button></div>}
           {view === 'projects' && (
-            <ProjectsView projects={projects} project={project} stages={stages} allStages={allStages} attention={attention} artifacts={artifacts} urls={urls} live={live} workerOnline={workerOnline}
+            <ProjectsView projects={projects} project={project} stages={stages} jobs={jobs} allStages={allStages} attention={attention} artifacts={artifacts} urls={urls} live={live} workerOnline={workerOnline}
               onSelect={setSelectedId} call={call} download={download} deleteProject={deleteProject} createSequel={createSequel} />
           )}
           {view === 'activity' && <ActivityView events={events} projects={projects} />}
@@ -214,11 +217,11 @@ function projectState(project: Project, stages: Stage[]): { label: string; tone:
 }
 
 function ProjectsView(props: {
-  projects: Project[]; project: Project | null; stages: Stage[]; allStages: Stage[]; attention: Attention; artifacts: Artifact[]; urls: Record<string, string>; live: boolean; workerOnline: boolean;
+  projects: Project[]; project: Project | null; stages: Stage[]; jobs: ActiveJob[]; allStages: Stage[]; attention: Attention; artifacts: Artifact[]; urls: Record<string, string>; live: boolean; workerOnline: boolean;
   onSelect: (id: string) => void; call: Call; download: Download; deleteProject: (id: string, paths: string[]) => Promise<string | null>;
   createSequel: (parentId: string, source: string, title: string, notes: string) => Promise<string | null>;
 }) {
-  const { projects, project, stages, allStages, attention, artifacts, urls, live, workerOnline, onSelect, call, download, deleteProject, createSequel } = props;
+  const { projects, project, stages, jobs, allStages, attention, artifacts, urls, live, workerOnline, onSelect, call, download, deleteProject, createSequel } = props;
   const [notifyAsked, setNotifyAsked] = useState(() => !('Notification' in window) || Notification.permission !== 'default');
   const [source, setSource] = useState('');
   const [title, setTitle] = useState('');
@@ -535,7 +538,7 @@ function ProjectsView(props: {
               </div>
               </details>
               {stage && <StagePanel key={stage.id} stage={stage} next={stages.filter((s) => s.stage_order > stage.stage_order && s.status === 'locked').sort((a, b) => a.stage_order - b.stage_order)[0] ?? null}
-                artifacts={artifacts.filter((a) => a.stage_id === stage.id)} urls={urls} call={call} download={download} />}
+                artifacts={artifacts.filter((a) => a.stage_id === stage.id)} urls={urls} call={call} download={download} projectTitle={project.title} jobs={jobs.filter((j) => j.stage_id === stage.id)} />}
             </div>
           )}
         </div>
@@ -568,7 +571,82 @@ const STAGE_TITLES: Record<string, string> = {
 const STAGE_TITLE = (key: string) => STAGE_TITLES[key] ?? key;
 const GENERATION_STAGES = ['character_images', 'character_sheets', 'scene_images', 'production'];
 
-function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: Stage; next: Stage | null; artifacts: Artifact[]; urls: Record<string, string>; call: Call; download: Download }) {
+// Copiar: a API do navegador só existe em página segura (https ou o próprio PC); pelo IP da rede de casa ela some,
+// então cai no jeito antigo (textarea + execCommand). Se nem isso der, o texto vira um arquivo .md baixado.
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; }
+  } catch { /* tenta o jeito antigo */ }
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.setAttribute('readonly', '');
+  Object.assign(area.style, { position: 'fixed', top: '0', left: '0', opacity: '0' });
+  document.body.appendChild(area);
+  area.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  area.remove();
+  return ok;
+}
+
+function saveText(text: string, name: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
+  const a = Object.assign(document.createElement('a'), { href: url, download: `${name.replace(/[^\w\-. ]+/g, '_').trim() || 'etapa'}.md` });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function CopyButton({ text, label, file, title, small = true }: { text: () => string; label: string; file: string; title?: string; small?: boolean }) {
+  const [state, setState] = useState<'idle' | 'copied' | 'saved'>('idle');
+  useEffect(() => {
+    if (state === 'idle') return;
+    const t = setTimeout(() => setState('idle'), 2500);
+    return () => clearTimeout(t);
+  }, [state]);
+  return (
+    <button type="button" className={`ghost${small ? ' small' : ''} copybtn`} title={title} aria-live="polite"
+      onClick={async (e) => {
+        e.preventDefault(); e.stopPropagation();   // dentro de <summary>, o clique não abre/fecha o bloco
+        const value = text();
+        if (await copyText(value)) setState('copied');
+        else { saveText(value, file); setState('saved'); }
+      }}>
+      {state === 'copied' ? <><Check size={13} /> Copiado</> : state === 'saved' ? <><Download size={13} /> Salvo em .md</> : <><Copy size={13} /> {label}</>}
+    </button>
+  );
+}
+
+// Tudo o que pertence à etapa, num texto só, para revisar em outro lugar: resumo, pedido de ajuste, avisos, erro,
+// documentos completos e o prompt de cada imagem/vídeo.
+function stageText(projectTitle: string, stage: Stage, docs: Artifact[], media: Artifact[]): string {
+  const p = stage.payload ?? {};
+  const out: string[] = [
+    `# ${projectTitle} · Etapa ${String(stage.stage_order).padStart(2, '0')} · ${stage.title}`,
+    `Versão ${stage.current_version} · ${p.skipped ? 'Pulada' : STATUS_LABEL[stage.status]}`,
+  ];
+  if (p.summary) out.push('## Resumo', p.summary);
+  if (p.review_comment && stage.current_version > 1) out.push('## Ajuste pedido nesta versão', p.review_comment);
+  if (p.warnings?.length) out.push('## Avisos', p.warnings.map((w) => `- ${w}`).join('\n'));
+  if (p.error) {
+    out.push('## Erro', [`${p.error.blocked ? 'Precisa de você' : 'Falhou'} · ${p.error.code}`, p.error.message, p.error.action].filter(Boolean).join('\n'));
+    if (p.error.item?.prompt) out.push(`### Parou em: ${p.error.item.name}`, '```', p.error.item.prompt, '```');
+  }
+  for (const doc of docs) out.push(`## ${doc.name} (v${doc.version})`, doc.content.markdown ?? '');
+  const items = media.filter((m) => m.content.prompt || m.content.note);
+  if (items.length) {
+    out.push(`## Prompts (${items.length})`);
+    for (const m of items) {
+      out.push(`### ${m.name}${m.local_relative_path ? ` · ${m.local_relative_path}` : ''}`);
+      if (m.content.prompt) out.push('```', m.content.prompt, '```');
+      if (m.content.note) out.push(m.content.note);
+    }
+  }
+  return out.join('\n\n').trim() + '\n';
+}
+
+function StagePanel({ stage, next, artifacts, urls, call, download, projectTitle, jobs }: { jobs: ActiveJob[]; stage: Stage; next: Stage | null; artifacts: Artifact[]; urls: Record<string, string>; call: Call; download: Download; projectTitle: string }) {
   const [open, setOpen] = useState<number | null>(null);
   const [comment, setComment] = useState('');
   const [asking, setAsking] = useState(false);
@@ -578,7 +656,15 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
   const docs = artifacts.filter((a) => a.artifact_type === 'document').sort((a, b) => (a.item_key ?? '').localeCompare(b.item_key ?? ''));
   const media = artifacts.filter((a) => a.artifact_type !== 'document').sort((a, b) => (a.item_key ?? '').localeCompare(b.item_key ?? ''));
   const reviewing = stage.status === 'pending_review';
-  const adjustable = GENERATION_STAGES.includes(stage.stage_key) && ['failed', 'pending_review', 'approved'].includes(stage.status);
+  // Itens em ajuste agora. Enquanto só há ajustes rodando, os demais itens continuam podendo ser ajustados.
+  const adjusting = ['queued', 'in_progress'].includes(stage.status) && jobs.length > 0 && jobs.every((j) => j.job_type === 'regen_item');
+  const fixing = new Map<string, 'queued' | 'running'>();
+  for (const job of jobs.filter((j) => j.job_type === 'regen_item')) {
+    for (const key of [job.input.item_key, ...(job.input.items ?? []).map((i) => i.item_key)]) {
+      if (key) fixing.set(key, job.status === 'running' ? 'running' : 'queued');
+    }
+  }
+  const adjustable = GENERATION_STAGES.includes(stage.stage_key) && (adjusting || ['failed', 'pending_review', 'approved'].includes(stage.status));
   const [fixPrompt, setFixPrompt] = useState('');
   const failedItem = stage.status === 'failed' ? payload.error?.item : undefined;
   useEffect(() => { setFixPrompt(failedItem?.prompt ?? ''); }, [failedItem?.key, failedItem?.prompt]);
@@ -586,7 +672,7 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
   const [selecting, setSelecting] = useState(false);
   const [notes, setNotes] = useState<Record<string, string>>({});   // item_key -> observação própria (a chave existir = item selecionado)
   const [bulk, setBulk] = useState('');
-  const regenerable = media.filter((m) => (m.artifact_type === 'image' || m.artifact_type === 'video') && !!m.item_key);
+  const regenerable = media.filter((m) => (m.artifact_type === 'image' || m.artifact_type === 'video') && !!m.item_key && !fixing.has(m.item_key));
   const chosen = regenerable.filter((m) => (m.item_key as string) in notes);
   const generation = payload.next_generation;
 
@@ -601,7 +687,11 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
     <div className="stagepanel">
       <div className="panelhead">
         <div><div className="eyebrow">ETAPA {String(stage.stage_order).padStart(2, '0')} · VERSÃO {stage.current_version}</div><h4>{stage.title}</h4></div>
-        <span className={`statuspill s-${stage.status}`}>{payload.skipped ? 'Pulada' : STATUS_LABEL[stage.status]}</span>
+        <div className="panelheadright">
+          {stage.status !== 'locked' && <CopyButton label="Copiar etapa" file={`${projectTitle} - ${stage.title}`} title="Copia documentos, prompts, resumo, avisos e erros desta etapa"
+            text={() => stageText(projectTitle, stage, docs, media)} />}
+          <span className={`statuspill s-${stage.status}`}>{payload.skipped ? 'Pulada' : STATUS_LABEL[stage.status]}</span>
+        </div>
       </div>
       {STAGE_META[stage.stage_key] && <div><span className={`agent ${STAGE_META[stage.stage_key].agent}`}>Feito por {AGENT_LABEL[STAGE_META[stage.stage_key].agent]}</span></div>}
 
@@ -649,6 +739,7 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
           {docs.map((doc, i) => (
             <details className="doc" key={doc.id} open={reviewing && i === 0}>
               <summary>{doc.name}<small>v{doc.version} · {timeAgo(doc.updated_at)}</small></summary>
+              <div className="doctools"><CopyButton label="Copiar documento" file={doc.name} text={() => doc.content.markdown ?? ''} /></div>
               <Markdown text={doc.content.markdown ?? ''} />
             </details>
           ))}
@@ -656,9 +747,10 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
       )}
 
       {media.length > 0 && (
-        <details className="fold" open={reviewing || stage.status === 'in_progress' || stage.status === 'failed'}>
+        <details className="fold" open={reviewing || adjusting || stage.status === 'in_progress' || stage.status === 'failed'}>
           <summary><span>{media.every((m) => m.artifact_type === 'video') ? 'Vídeos' : media.every((m) => m.artifact_type === 'image') ? 'Imagens' : 'Arquivos'}</span><em>{media.length}</em><ChevronDown size={16} className="chev" /></summary>
           {adjustable && stage.status === 'approved' && <p className="muted">Quer mudar algo? Use <b>Ajustar</b> em qualquer item: só ele é refeito e a etapa volta para a sua revisão. Confira depois se as etapas seguintes ainda servem.</p>}
+          {adjusting && <p className="muted" role="status"><b>{fixing.size}</b> {fixing.size === 1 ? 'item em ajuste' : 'itens em ajuste'}. Você pode ajustar outros enquanto isso; a aprovação volta quando todos terminarem.</p>}
           {adjustable && regenerable.length > 1 && (
             <div className="selbar">
               {selecting
@@ -674,9 +766,9 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
           <div className="mediagrid">
             {media.map((item) => {
               const k = item.item_key ?? '';
-              const can = adjustable && (item.artifact_type === 'image' || item.artifact_type === 'video') && !!item.item_key;
+              const can = adjustable && (item.artifact_type === 'image' || item.artifact_type === 'video') && !!item.item_key && !fixing.has(k);
               return <MediaCard key={item.id} item={item} stageId={stage.id} url={item.storage_path ? urls[`${item.storage_path}|${item.updated_at}`] : undefined}
-                canRegenerate={can} call={call} download={download}
+                canRegenerate={can} pending={fixing.get(k)} call={call} download={download}
                 select={selecting && can ? { on: k in notes, note: notes[k] ?? '', toggle: () => setNotes((old) => { const n = { ...old }; if (k in n) delete n[k]; else n[k] = ''; return n; }), setNote: (v) => setNotes((old) => ({ ...old, [k]: v })) } : undefined}
                 onOpen={item.artifact_type === 'image' && item.storage_path ? () => setOpen(gallery.findIndex((g) => g.id === item.id)) : undefined} />;
             })}
@@ -741,8 +833,9 @@ function StagePanel({ stage, next, artifacts, urls, call, download }: { stage: S
 
 type Select = { on: boolean; note: string; toggle: () => void; setNote: (v: string) => void };
 
-function MediaCard({ item, stageId, url, canRegenerate, call, download, onOpen, select }: { item: Artifact; stageId: string; url?: string; canRegenerate: boolean; call: Call; download: Download; onOpen?: () => void; select?: Select }) {
+function MediaCard({ item, stageId, url, canRegenerate, pending, call, download, onOpen, select }: { item: Artifact; stageId: string; url?: string; canRegenerate: boolean; pending?: 'queued' | 'running'; call: Call; download: Download; onOpen?: () => void; select?: Select }) {
   const [asking, setAsking] = useState(false);
+  const [sending, setSending] = useState(false);   // evita o clique duplo no mesmo pedido
   const [comment, setComment] = useState('');
   const original = item.content.prompt ?? '';
   const [prompt, setPrompt] = useState(original);
@@ -751,7 +844,8 @@ function MediaCard({ item, stageId, url, canRegenerate, call, download, onOpen, 
   const localUrl = localVideoUrl(item, access);
   const size = item.content.width && item.content.height ? `${item.content.width}×${item.content.height}` : item.content.duration ? `${item.content.duration} s` : '';
   return (
-    <figure className={`mediacard ${item.artifact_type}${select?.on ? ' picked' : ''}`}>
+    <figure className={`mediacard ${item.artifact_type}${select?.on ? ' picked' : ''}${pending ? ' fixing' : ''}`}>
+      {pending && <div className="fixingtag"><RefreshCw size={13} /> {pending === 'running' ? 'Em ajuste' : 'Ajuste na fila'}</div>}
       {select && <label className="pick"><input type="checkbox" checked={select.on} onChange={select.toggle} /> {select.on ? 'Selecionado' : 'Selecionar'}</label>}
       {item.artifact_type === 'video'
         ? (item.content.local ? <LocalVideo item={item} /> : url ? <video src={url} controls playsInline preload="metadata" /> : <div className="placeholder">{item.content.note ?? 'Prévia indisponível'}</div>)
@@ -759,7 +853,7 @@ function MediaCard({ item, stageId, url, canRegenerate, call, download, onOpen, 
       <figcaption>
         <b>{item.name}</b>
         <small>{[size, item.local_relative_path].filter(Boolean).join(' · ')}</small>
-        {item.content.prompt && <details><summary>Prompt usado</summary><pre>{item.content.prompt}</pre></details>}
+        {item.content.prompt && <details><summary>Prompt usado</summary><CopyButton label="Copiar prompt" file={item.name} text={() => item.content.prompt ?? ''} /><pre>{item.content.prompt}</pre></details>}
         {localUrl ? <a className="ghost small" href={localUrl} download={item.name.replace(/[^\w.-]+/g, '_') + '.mp4'}><Download size={13} /> Baixar vídeo</a>
           : item.storage_path && <button className="ghost small" onClick={() => download(item.storage_path as string, item.name.replace(/[^\w.-]+/g, '_') + (item.artifact_type === 'video' ? '.mp4' : '.jpg'))}><Download size={13} /> Baixar prévia</button>}
         {select?.on && <input className="picknote" value={select.note} onChange={(e) => select.setNote(e.target.value)} placeholder="O que está errado nesta (opcional)" aria-label={`Observação para ${item.name}`} />}
@@ -767,7 +861,12 @@ function MediaCard({ item, stageId, url, canRegenerate, call, download, onOpen, 
           <div className="regen">
             {original && <textarea rows={5} value={prompt} onChange={(e) => setPrompt(e.target.value)} spellCheck={false} aria-label={`Prompt de ${item.name}`} />}
             <input autoFocus value={comment} onChange={(e) => setComment(e.target.value)} placeholder="O que ajustar (opcional)" />
-            <button onClick={async () => { if (await call('adjust_item', { p_stage_id: stageId, p_item_key: item.item_key, p_prompt: prompt.trim() && prompt.trim() !== original.trim() ? prompt : null, p_comment: comment.trim() || null }, `Ajuste enfileirado: ${item.name}.`)) { setAsking(false); setComment(''); } }}>Gerar de novo</button>
+            <button disabled={sending} onClick={async () => {
+              setSending(true);
+              const ok = await call('adjust_item', { p_stage_id: stageId, p_item_key: item.item_key, p_prompt: prompt.trim() && prompt.trim() !== original.trim() ? prompt : null, p_comment: comment.trim() || null }, `Ajuste enfileirado: ${item.name}.`);
+              setSending(false);
+              if (ok) { setAsking(false); setComment(''); }
+            }}>Gerar de novo</button>
             <button className="ghost" onClick={() => setAsking(false)}>Cancelar</button>
           </div>
         ) : <button className="ghost small" onClick={() => setAsking(true)}><RotateCcw size={13} /> Ajustar</button>)}
@@ -827,7 +926,7 @@ function Lightbox({ items, index, urls, setIndex, download }: { items: Artifact[
           <div className="lbtop"><span>{index + 1} de {items.length}</span><button className="iconbtn" aria-label="Fechar" onClick={() => setIndex(null)}><X size={16} /></button></div>
           <b>{item.name}</b>
           <small>{[item.content.width && item.content.height ? `${item.content.width}×${item.content.height}` : '', item.local_relative_path].filter(Boolean).join(' · ')}</small>
-          {item.content.prompt && <><div className="eyebrow">PROMPT USADO</div><pre>{item.content.prompt}</pre></>}
+          {item.content.prompt && <><div className="eyebrow">PROMPT USADO</div><CopyButton label="Copiar prompt" file={item.name} text={() => item.content.prompt ?? ''} /><pre>{item.content.prompt}</pre></>}
           <div className="lbbtns">
             <button className="ghost" onClick={() => go(-1)} disabled={items.length < 2}><ChevronLeft size={15} /> Anterior</button>
             <button className="ghost" onClick={() => go(1)} disabled={items.length < 2}>Próxima <ChevronRight size={15} /></button>

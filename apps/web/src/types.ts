@@ -32,6 +32,8 @@ export type Artifact = {
   content: { markdown?: string; prompt?: string; width?: number; height?: number; duration?: number; note?: string; local?: boolean }; updated_at: string;
 };
 
+// Tarefa na fila ou rodando: mostra quais itens estão em ajuste neste momento.
+export type ActiveJob = { id: string; stage_id: string | null; job_type: string; status: string; input: { item_key?: string; items?: { item_key: string }[] } };
 export type EventRow = { id: number; project_id: string; stage_key: string | null; level: 'info' | 'warn' | 'error'; message: string; created_at: string };
 export type MediaAccess = { worker_id: string; local_url: string | null; public_url: string | null; token: string };
 export type Heartbeat = { worker_id: string; hostname: string | null; status: string; last_seen_at: string; details: { job?: { stage_key?: string } | null } };
